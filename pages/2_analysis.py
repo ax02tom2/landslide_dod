@@ -430,44 +430,6 @@ def selected_zone_mask(z, choice):
 collapse_options = zone_choice_options("collapse", "未圈繪（依 DoD 自動偵測）")
 potential_options = zone_choice_options("potential", "未圈繪")
 
-# 與剖面線一致：有多塊時可指定目前分析對象；「全部」保留原本整體分析。
-if len(collapse_options) > 1:
-    old_choice = st.session_state.get("collapse_region_choice", "全部")
-    if old_choice not in collapse_options:
-        old_choice = "全部"
-    st.sidebar.selectbox(
-        "🔴 實際崩塌分析範圍",
-        collapse_options,
-        index=collapse_options.index(old_choice),
-        key="collapse_region_choice",
-        help="可選擇全部崩塌區，或只分析其中一塊。崩塌統計與 DoD 深度參考會跟著選擇。"
-    )
-else:
-    st.session_state["collapse_region_choice"] = collapse_options[0]
-
-if len(potential_options) > 1:
-    old_choice = st.session_state.get("potential_region_choice", "全部")
-    if old_choice not in potential_options:
-        old_choice = "全部"
-    st.sidebar.selectbox(
-        "🟠 潛在滑動體分析範圍",
-        potential_options,
-        index=potential_options.index(old_choice),
-        key="potential_region_choice",
-        help="可選擇全部潛在滑動體，或只分析其中一塊。殘餘土體與敏感度分析會跟著選擇。"
-    )
-else:
-    st.session_state["potential_region_choice"] = potential_options[0]
-
-selected_collapse = selected_zone_mask(
-    "collapse",
-    st.session_state["collapse_region_choice"]
-) if m_collapse is not None else None
-selected_potential = selected_zone_mask(
-    "potential",
-    st.session_state["potential_region_choice"]
-) if m_potential is not None else None
-
 # --------------------------------------------------------------------------
 # 差分 + 對位校正
 # --------------------------------------------------------------------------
@@ -507,6 +469,55 @@ else:
 sb.select_slider("地圖預覽解析度（px，越小越不易卡）", options=[500, 700, 900, 1200, 1600], value=int(st.session_state.get("map_px", 900)), key="map_px")
 sb.number_input("色階範圍 ±(m)", 0.5, 100.0, 5.0, 0.5, key="vmax")
 vmax = float(st.session_state["vmax"])
+
+# --------------------------------------------------------------------------
+# 分析區域選擇（主畫面）
+# --------------------------------------------------------------------------
+# 原本把選擇器放在側邊欄，但側邊欄同時包含大量資料/計算設定，
+# 使用者很容易找不到。因此改成與「選擇剖面」相同的主畫面操作方式，
+# 並且只要已有圈繪範圍，就一定顯示「全部 + 第 N 塊」，即使只有一塊也可明確看到。
+st.markdown("### 🎯 分析區域選擇")
+st.caption("這裡決定『這一次分析哪一塊』。可以選 **全部**，也可以指定某一個實際崩塌區或潛在滑動體區；選擇會套用到後面的量體、深度參考與殘餘土體分析。")
+rc1, rc2 = st.columns(2)
+
+if m_collapse is not None:
+    old_choice = st.session_state.get("collapse_region_choice", "全部")
+    if old_choice not in collapse_options:
+        old_choice = "全部"
+    rc1.selectbox(
+        "🔴 實際崩塌分析範圍",
+        collapse_options,
+        index=collapse_options.index(old_choice),
+        key="collapse_region_choice",
+        help="選擇全部實際崩塌範圍，或只分析第 N 塊。實際崩塌統計與崩落深度參考會跟著選擇。",
+    )
+else:
+    st.session_state["collapse_region_choice"] = collapse_options[0]
+    rc1.info("🔴 實際崩塌範圍：目前未圈繪，使用整個有效分析區的 DoD 自動偵測。")
+
+if m_potential is not None:
+    old_choice = st.session_state.get("potential_region_choice", "全部")
+    if old_choice not in potential_options:
+        old_choice = "全部"
+    rc2.selectbox(
+        "🟠 潛在滑動體分析範圍",
+        potential_options,
+        index=potential_options.index(old_choice),
+        key="potential_region_choice",
+        help="選擇全部潛在滑動體範圍，或只分析第 N 塊。殘餘土體與敏感度分析會跟著選擇。",
+    )
+else:
+    st.session_state["potential_region_choice"] = potential_options[0]
+    rc2.info("🟠 潛在滑動體範圍：目前未圈繪。")
+
+selected_collapse = selected_zone_mask(
+    "collapse",
+    st.session_state["collapse_region_choice"],
+) if m_collapse is not None else None
+selected_potential = selected_zone_mask(
+    "potential",
+    st.session_state["potential_region_choice"],
+) if m_potential is not None else None
 
 # 範圍定義
 # DoD 永遠先在整個有效分析區計算；選定的圈繪範圍控制後續統計/殘餘分析。
@@ -1065,4 +1076,4 @@ if section == "🗺️ 範圍與剖面線":
     cnt = {ZONES[z][0]: len(st.session_state[f"geo_{z}"]) + (1 if st.session_state.get(f"up_{z}_{case_id}") else 0)
            for z in ZONES}
     st.write("已儲存數量：" + "　".join(f"**{k}** {v}" for k, v in cnt.items()))
-    st.caption("說明：🔴 實際崩塌與 🟠 潛在滑動體都可畫多塊；分析時可在左側分別選擇「全部」或指定第幾塊。🔵 堆積區仍控制堆積統計。DoD 本身永遠先計算整個分析區。")
+    st.caption("說明：🔴 實際崩塌與 🟠 潛在滑動體都可畫多塊；儲存後請到分析主畫面的「🎯 分析區域選擇」選擇「全部」或指定第幾塊。🔵 堆積區仍控制堆積統計。DoD 本身永遠先計算整個分析區。")
