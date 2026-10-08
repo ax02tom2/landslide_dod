@@ -96,32 +96,41 @@ def render_case_home() -> None:
             st.rerun()
 
 
-# Streamlit 原生多頁導覽：這裡才是左側真正的「可點擊」作業順序。
-# 不依賴 st.switch_page("pages/...")，因此不會再因 Cloud 路徑解析而 PageNotFound。
-nav_pages = {
-    "案件": [
-        st.Page(render_case_home, title="案件管理", icon="📁", url_path="cases"),
-    ],
-    "作業順序": [
-        st.Page("pages/1_preprocess.py", title="① 前處理｜裁切與縮小", icon="✂️", url_path="preprocess"),
-        st.Page("pages/2_analysis.py", title="② 地形變異分析｜DoD", icon="⛰️", url_path="analysis"),
-    ],
-}
+# --------------------------------------------------------------------------
+# 左側固定工作流程導覽
+# --------------------------------------------------------------------------
+# 這裡刻意不用 st.navigation。部分 Streamlit Cloud / 多頁環境下，
+# st.navigation 可能不顯示側邊欄項目；改用 page_link 可直接對應 pages/ 下的頁面。
+# 登入後三個入口固定存在：案件管理、① 前處理、② DoD 分析。
 
-# 導覽只顯示案件管理與兩個工作頁，不顯示 app.py 這種程式檔名。
-pg = st.navigation(nav_pages, position="sidebar", expanded=True)
-
-# 使用者資訊放在原生導覽下方。
 if logged_in():
     st.sidebar.divider()
+    st.sidebar.markdown("## ⛰️ 崩塌地形變異分析")
+    st.sidebar.markdown("### 作業順序")
+
+    st.sidebar.page_link("app.py", label="📁 案件管理")
+    st.sidebar.page_link(
+        "pages/1_preprocess.py",
+        label="① 前處理｜裁切與縮小",
+        icon="✂️",
+    )
+    st.sidebar.page_link(
+        "pages/2_analysis.py",
+        label="② 地形變異分析｜DoD",
+        icon="⛰️",
+    )
+
+    st.sidebar.divider()
     st.sidebar.caption(f"👤 {st.session_state['user']['username']}")
+
     case_id = st.session_state.get("case_id")
     if case_id:
         case = cm.get_case(st.session_state["user"]["id"], case_id)
         if case:
             st.sidebar.caption(f"📁 目前案件：{case['name']}")
+
     if st.sidebar.button("登出", width="stretch"):
         st.session_state.clear()
         st.rerun()
 
-pg.run()
+render_case_home()
