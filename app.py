@@ -1,41 +1,62 @@
-"""崩塌地形變異分析 — 主入口 / 使用流程說明
+"""崩塌地形變異分析 — 主入口與工作流程導航
 
-正式工作頁：
-1. ① 前處理｜裁切與縮小
-2. ② 地形變異分析｜DoD
+使用者只需要依序操作：
+① 前處理｜裁切與縮小
+② 地形變異分析｜DoD
+
+本檔案本身不作為分析工作頁；它只負責正式入口、品牌標題與頁面導航。
 """
+from __future__ import annotations
+
 import streamlit as st
 
-st.set_page_config(page_title="崩塌地形變異分析", page_icon="⛰️", layout="wide")
+st.set_page_config(
+    page_title="崩塌地形變異分析",
+    page_icon="⛰️",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-st.title("⛰️ 崩塌地形變異分析")
-st.caption("DEM of Difference（DoD）· 實際崩塌 · 潛在滑動體 · 殘餘不穩定土體 · 剖面 · 匯出")
+# ------------------------------------------------------------------
+# 左側正式工作流程
+# ------------------------------------------------------------------
+with st.sidebar:
+    st.markdown(
+        """
+        <div style="
+            font-size: 1.18rem;
+            font-weight: 700;
+            line-height: 1.35;
+            margin: 0.2rem 0 0.35rem 0;
+        ">
+            ⛰️ 崩塌地形變異分析
+        </div>
+        <div style="
+            color: #6b7280;
+            font-size: 0.82rem;
+            margin-bottom: 1rem;
+        ">
+            工程分析工作流程
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-st.markdown("""
-### 使用流程
+# st.navigation 會取代 Streamlit 原本的自動 pages 導航，
+# 因此左側不再顯示「app / 1_preprocess / 2_analysis」等程式檔名。
+pages = [
+    st.Page(
+        "pages/1_preprocess.py",
+        title="① 前處理｜裁切與縮小",
+        icon="📐",
+        default=True,
+    ),
+    st.Page(
+        "pages/2_analysis.py",
+        title="② 地形變異分析｜DoD",
+        icon="⛰️",
+    ),
+]
 
-**① 前處理｜裁切與縮小**  
-先將大型 T1 / T2 DEM（及選用的正射影像）裁切到研究區，必要時降低解析度。這一步的目的，是避免大型 GeoTIFF 直接進分析頁造成記憶體壓力。
-
-**↓ 完成 T1、T2 後**
-
-**② 地形變異分析｜DoD**  
-計算整個裁切分析範圍的 DoD，再分開圈繪：
-- 🔴 **實際崩塌範圍**：已經發生崩塌的區域，只控制崩塌統計。
-- 🟣 **潛在滑動體範圍**：包含已崩塌與尚可能滑動的完整範圍，只控制殘餘不穩定土體。
-- 🔵 **堆積區**：需要單獨統計堆積量時使用。
-
-### 建議
-- 大型 DEM 建議先在 **① 前處理** 裁切，分析頁的降採樣倍率預設為 **4 倍**。
-- DoD 本身不會因為你畫了「潛在滑動體」而改變；圈繪範圍只會控制對應的工程統計。
-- 「殘餘土體」需要先選擇滑動面假設，再按 **計算殘餘土體**，不會進頁面就自動跑大型計算。
-""")
-
-c1, c2 = st.columns(2)
-with c1:
-    st.info("**第一步**\n\n到左側 **① 前處理｜裁切與縮小**，先完成 T1、T2。")
-with c2:
-    st.success("**第二步**\n\n完成前處理後，到左側 **② 地形變異分析｜DoD** 開始分析。")
-
-st.divider()
-st.caption("V4｜大檔穩定版　•　正式工程分析仍應搭配現地調查、鑽孔、監測或其他地工資料判讀。")
+pg = st.navigation(pages, position="sidebar")
+pg.run()
