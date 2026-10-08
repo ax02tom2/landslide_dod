@@ -95,7 +95,7 @@ if st.session_state.get("_loaded_case_id") != case_id:
 
 
 def persist_case(extra_state=None):
-    settings_keys = ["factor", "nd_txt", "corr_label", "lod", "map_px", "vmax", "bulk", "analysis_section", "draw_zone", "slip_method", "depth_basis", "d_uni", "slip_kind", "slip_fb", "d_fb", "s_min", "s_max", "s_step", "pstep", "ve", "use_manual", "collapse_region_choice", "potential_region_choice", "e1", "n1", "e2", "n2"]
+    settings_keys = ["factor", "nd_txt", "corr_label", "lod", "map_px", "vmax", "bulk", "analysis_section", "draw_zone", "slip_method", "depth_basis", "d_uni", "slip_kind", "slip_fb", "d_fb", "s_min", "s_max", "s_step", "pstep", "ve", "use_manual", "collapse_region_choice", "potential_region_choice", "deposit_region_choice", "e1", "n1", "e2", "n2"]
     settings = {k: st.session_state.get(k) for k in settings_keys if k in st.session_state}
     zones = {z: st.session_state.get(f"geo_{z}", []) for z in ZONES}
     state = dict(case_state)
@@ -397,10 +397,12 @@ m_collapse, m_potential, m_dep, m_stab, m_exc = (zone_mask(z) for z in ("collaps
 valid = valid0 & ~m_exc if m_exc is not None else valid0
 
 # --------------------------------------------------------------------------
-# 多區塊分析選擇
+# 多區塊分析選擇工具
 # --------------------------------------------------------------------------
-# 同一類型可以畫多個區塊。這裡不再把所有 polygon 強制合併，
-# 而是讓使用者像選擇剖面線一樣，指定目前要分析哪一塊。
+# 同一類型可以畫多個區塊。選擇器會依分析工作區顯示：
+# - 「差異與量體」：實際崩塌、堆積區
+# - 「殘餘土體」：潛在滑動體
+# 這樣不會把所有分析設定一次塞在畫面最上方。
 def zone_choice_options(z, none_label):
     geoms = zone_geoms(z)
     if not geoms:
@@ -429,6 +431,7 @@ def selected_zone_mask(z, choice):
 
 collapse_options = zone_choice_options("collapse", "未圈繪（依 DoD 自動偵測）")
 potential_options = zone_choice_options("potential", "未圈繪")
+deposit_options = zone_choice_options("deposit", "未圈繪（依 DoD 自動偵測）")
 
 # --------------------------------------------------------------------------
 # 差分 + 對位校正
@@ -471,53 +474,63 @@ sb.number_input("色階範圍 ±(m)", 0.5, 100.0, 5.0, 0.5, key="vmax")
 vmax = float(st.session_state["vmax"])
 
 # --------------------------------------------------------------------------
-# 分析區域選擇（主畫面）
+# 分析工作區 + 依工作區顯示對應的分析範圍選擇
 # --------------------------------------------------------------------------
-# 原本把選擇器放在側邊欄，但側邊欄同時包含大量資料/計算設定，
-# 使用者很容易找不到。因此改成與「選擇剖面」相同的主畫面操作方式，
-# 並且只要已有圈繪範圍，就一定顯示「全部 + 第 N 塊」，即使只有一塊也可明確看到。
-st.markdown("### 🎯 分析區域選擇")
-st.caption("這裡決定『這一次分析哪一塊』。可以選 **全部**，也可以指定某一個實際崩塌區或潛在滑動體區；選擇會套用到後面的量體、深度參考與殘餘土體分析。")
-rc1, rc2 = st.columns(2)
+section = st.radio(
+    "分析工作區",
+    ["🗺️ 範圍與剖面線", "📊 差異與量體", "🧱 殘餘土體", "📈 剖面", "💾 匯出"],
+    horizontal=True,
+    key="analysis_section",
+)
 
-if m_collapse is not None:
-    old_choice = st.session_state.get("collapse_region_choice", "全部")
-    if old_choice not in collapse_options:
-        old_choice = "全部"
-    rc1.selectbox(
+def _normalize_choice(key, options):
+    old = st.session_state.get(key)
+    if old not in options:
+        st.session_state[key] = options[0]
+
+
+_normalize_choice("collapse_region_choice", collapse_options)
+_normalize_choice("potential_region_choice", potential_options)
+_normalize_choice("deposit_region_choice", deposit_options)
+
+# 差異與量體：只在這裡選「實際崩塌」與「堆積區」。
+if section == "📊 差異與量體":
+    st.markdown("### 🎯 本頁分析範圍")
+    st.caption("只影響目前『差異與量體』的統計。『全部』會把同類型的所有圈繪區一起計算。")
+    rc1, rc2 = st.columns(2)
+    collapse_choice = rc1.selectbox(
         "🔴 實際崩塌分析範圍",
         collapse_options,
-        index=collapse_options.index(old_choice),
         key="collapse_region_choice",
-        help="選擇全部實際崩塌範圍，或只分析第 N 塊。實際崩塌統計與崩落深度參考會跟著選擇。",
+        help="選擇全部實際崩塌區，或只分析其中一塊。崩塌體積、面積與崩落深度統計會跟著選擇。",
     )
-else:
-    st.session_state["collapse_region_choice"] = collapse_options[0]
-    rc1.info("🔴 實際崩塌範圍：目前未圈繪，使用整個有效分析區的 DoD 自動偵測。")
+    deposit_choice = rc2.selectbox(
+        "🔵 堆積區分析範圍",
+        deposit_options,
+        key="deposit_region_choice",
+        help="選擇全部堆積區，或只分析其中一塊。未圈繪時，會以有效分析區的 DoD 正變化自動統計。",
+    )
+# selectbox 本身會同步更新 session_state；這裡不要在 widget 建立後再直接寫入同一個 key。
 
-if m_potential is not None:
-    old_choice = st.session_state.get("potential_region_choice", "全部")
-    if old_choice not in potential_options:
-        old_choice = "全部"
-    rc2.selectbox(
+# 殘餘土體：只在這裡選「潛在滑動體」。
+elif section == "🧱 殘餘土體":
+    st.markdown("### 🎯 本頁分析範圍")
+    st.caption("殘餘土體計算以選定的潛在滑動體為分析範圍。")
+    potential_choice = st.selectbox(
         "🟠 潛在滑動體分析範圍",
         potential_options,
-        index=potential_options.index(old_choice),
         key="potential_region_choice",
-        help="選擇全部潛在滑動體範圍，或只分析第 N 塊。殘餘土體與敏感度分析會跟著選擇。",
+        help="選擇全部潛在滑動體，或只分析其中一塊。殘餘土體與深度敏感度分析會跟著選擇。",
     )
-else:
-    st.session_state["potential_region_choice"] = potential_options[0]
-    rc2.info("🟠 潛在滑動體範圍：目前未圈繪。")
-
 selected_collapse = selected_zone_mask(
-    "collapse",
-    st.session_state["collapse_region_choice"],
+    "collapse", st.session_state["collapse_region_choice"]
 ) if m_collapse is not None else None
 selected_potential = selected_zone_mask(
-    "potential",
-    st.session_state["potential_region_choice"],
+    "potential", st.session_state["potential_region_choice"]
 ) if m_potential is not None else None
+selected_deposit = selected_zone_mask(
+    "deposit", st.session_state["deposit_region_choice"]
+) if m_dep is not None else None
 
 # 範圍定義
 # DoD 永遠先在整個有效分析區計算；選定的圈繪範圍控制後續統計/殘餘分析。
@@ -532,22 +545,19 @@ if m_collapse is not None:
 else:
     actual_collapse_region = valid & (dz < -lod)
 
+# 堆積量體的邏輯：
+# - 有圈繪堆積區：只在選定堆積區內統計 DoD 正變化（dz > LoD）。
+# - 沒圈繪堆積區：不再排除潛在滑動體，直接用整個有效分析區的 DoD 正變化自動統計。
+# 這樣「未畫堆積區」的案例仍有合理的自動堆積量體；要精確分事件時，再畫堆積區即可。
 if m_dep is not None:
-    dep_region = m_dep & valid
-elif m_potential is not None:
-    dep_region = valid & ~m_potential
+    dep_base = selected_deposit if selected_deposit is not None else m_dep
+    dep_region = dep_base & valid
 else:
     dep_region = valid
 
 # --------------------------------------------------------------------------
-# 分頁：只計算目前工作區需要的統計，避免每次點按鈕都建立大型暫存陣列。
+# 只計算目前工作區需要的統計
 # --------------------------------------------------------------------------
-section = st.radio(
-    "分析工作區",
-    ["🗺️ 範圍與剖面線", "📊 差異與量體", "🧱 殘餘土體", "📈 剖面", "💾 匯出"],
-    horizontal=True,
-    key="analysis_section",
-)
 S_src = S_dep = S_all = None
 if section in ("📊 差異與量體", "💾 匯出"):
     S_src = volume_stats_chunked(dz, lod, CA, actual_collapse_region, sigma)
@@ -560,10 +570,12 @@ elif section == "🧱 殘餘土體":
 if section == "📊 差異與量體":
     st.info(
         f"目前分析：實際崩塌＝{st.session_state.get('collapse_region_choice', '全部')}；"
-        f"潛在滑動體＝{st.session_state.get('potential_region_choice', '全部')}"
+        f"堆積區＝{st.session_state.get('deposit_region_choice', '全部')}"
     )
     if m_collapse is None:
         st.info("未圈繪「實際崩塌範圍」：目前以整個有效分析區的 DoD（dz < -LoD）自動統計。若只要統計特定崩塌事件，可圈繪實際崩塌範圍。")
+    if m_dep is None:
+        st.info("未圈繪「堆積區」：目前以整個有效分析區的 DoD 正變化（dz > +LoD）自動統計。要分辨多個獨立堆積事件，再到「範圍與剖面線」多畫幾個堆積區。")
     c = st.columns(4)
     c[0].metric("崩塌（侵蝕）體積", fmt_m3(S_src["侵蝕體積_m3"]))
     c[1].metric("堆積體積", fmt_m3(S_dep["堆積體積_m3"]))
@@ -937,10 +949,11 @@ if section == "💾 匯出":
         bio = io.BytesIO()
         with pd.ExcelWriter(bio, engine="openpyxl") as xw:
             pd.DataFrame({"項目": ["降採樣倍率", "格距(m)", "LoD(m)", "校正模式", "膨脹係數", "滑動面來源",
-                                      "實際崩塌分析範圍", "潛在滑動體分析範圍"],
+                                      "實際崩塌分析範圍", "潛在滑動體分析範圍", "堆積區分析範圍"],
                           "值": [factor, grid.cell_x, lod, corr_mode, st.session_state.get("bulk", ""), slip_label,
                                  st.session_state.get("collapse_region_choice", "全部"),
-                                 st.session_state.get("potential_region_choice", "全部")]}
+                                 st.session_state.get("potential_region_choice", "全部"),
+                                 st.session_state.get("deposit_region_choice", "全部")]}
                          ).to_excel(xw, sheet_name="參數", index=False)
             pd.DataFrame({"實際崩塌（DoD）": S_src, "堆積區": S_dep, "全區": S_all}).to_excel(xw, sheet_name="崩塌與堆積統計")
             if stored_res:
