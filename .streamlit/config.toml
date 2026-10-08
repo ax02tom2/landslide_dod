@@ -1,2 +1,6 @@
-  [server]
-  maxUploadSize = 1000
+[server]
+maxUploadSize = 1000
+maxMessageSize = 200
+
+[client]
+showSidebarNavigation = false
