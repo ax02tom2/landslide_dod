@@ -35,12 +35,23 @@ TMP = os.path.join(tempfile.gettempdir(), "dod_app")
 os.makedirs(TMP, exist_ok=True)
 
 ZONES = {
-    "collapse": ("實際崩塌範圍", "#d32f2f", "polygon"),
-    "potential": ("潛在滑動體範圍", "#7b1fa2", "polygon"),
-    "deposit": ("堆積區", "#1e88e5", "polygon"),
-    "stable": ("穩定區 (校正用)", "#43a047", "polygon"),
-    "exclude": ("排除區 (植被/水體/建物)", "#757575", "polygon"),
-    "profile": ("剖面線", "#fb8c00", "line"),
+    # 工程 GIS 配色：紅=已發生、橙=潛勢、藍=堆積；其他為輔助圖層。
+    "collapse": ("實際崩塌範圍", "#c62828", "polygon"),
+    "potential": ("潛在滑動體範圍", "#ef6c00", "polygon"),
+    "deposit": ("堆積區", "#1565c0", "polygon"),
+    "stable": ("穩定區 (校正用)", "#2e7d32", "polygon"),
+    "exclude": ("排除區 (植被/水體/建物)", "#616161", "polygon"),
+    "profile": ("剖面線", "#f9a825", "line"),
+}
+
+# 工程 GIS 圖徵樣式：實際崩塌用實線、潛在滑動體用虛線、堆積區用藍色。
+ZONE_DRAW_STYLES = {
+    "collapse": {"color": "#c62828", "weight": 3.5, "opacity": 0.95, "fillColor": "#c62828", "fillOpacity": 0.12},
+    "potential": {"color": "#ef6c00", "weight": 3.0, "opacity": 0.95, "fillColor": "#ef6c00", "fillOpacity": 0.08, "dashArray": "8 5"},
+    "deposit": {"color": "#1565c0", "weight": 3.0, "opacity": 0.95, "fillColor": "#1565c0", "fillOpacity": 0.10},
+    "stable": {"color": "#2e7d32", "weight": 2.5, "opacity": 0.9, "fillColor": "#2e7d32", "fillOpacity": 0.06, "dashArray": "6 4"},
+    "exclude": {"color": "#616161", "weight": 2.5, "opacity": 0.9, "fillColor": "#616161", "fillOpacity": 0.05, "dashArray": "4 4"},
+    "profile": {"color": "#f9a825", "weight": 3.0, "opacity": 0.95},
 }
 POLY_ZONES = [z for z, v in ZONES.items() if v[2] == "polygon"]
 
@@ -666,37 +677,22 @@ def build_overlays():
 
 
 if section == "🗺️ 範圍與剖面線":
-    st.markdown("""
-<style>
-/* Leaflet Draw 編輯控制點 */
-.leaflet-editing-icon,
-.leaflet-marker-icon.leaflet-editing-icon {
-    width: 4px !important;
-    height: 4px !important;
-    margin-left: -2px !important;
-    margin-top: -2px !important;
-    border: 1px solid #ffffff !important;
-    border-radius: 1px !important;
-}
-
-/* 編輯中的頂點 */
-.leaflet-div-icon.leaflet-editing-icon {
-    width: 4px !important;
-    height: 4px !important;
-    margin-left: -2px !important;
-    margin-top: -2px !important;
-    border: 1px solid #ffffff !important;
-    background: #ffffff !important;
-}
-
-/* Leaflet Draw 預設頂點 */
-.leaflet-marker-icon.leaflet-div-icon {
-    box-sizing: border-box !important;
-}
-</style>
-""", unsafe_allow_html=True)
+    st.markdown("""<style>
+    /* Leaflet Draw 控制點：小而清楚，避免遮住 DoD。 */
+    .leaflet-editing-icon,
+    .leaflet-marker-icon.leaflet-editing-icon,
+    .leaflet-div-icon.leaflet-editing-icon {
+        width: 5px !important;
+        height: 5px !important;
+        margin-left: -2.5px !important;
+        margin-top: -2.5px !important;
+        border: 1px solid #ffffff !important;
+        border-radius: 1px !important;
+        box-shadow: 0 0 1px rgba(0,0,0,.65) !important;
+    }
+    </style>""", unsafe_allow_html=True)
     zone = st.radio("目前要繪製的類型", list(ZONES), format_func=lambda z: ZONES[z][0], horizontal=True, key="draw_zone")
-    st.caption("🔴 實際崩塌範圍＝控制崩塌事件統計；🟣 潛在滑動體範圍＝控制殘餘土體；DoD 本身不受這兩個範圍限制。畫完後按「💾 儲存」。")
+    st.caption("🔴 實際崩塌＝DoD 已發生變化；🟠 潛在滑動體＝後續殘餘土體評估；🔵 堆積區＝崩落土體堆積位置。三者用途分開，不互相取代。畫完後按「💾 儲存」。")
     with st.spinner("準備地圖圖層…"):
         overlays = memo(("overlays", dkey, zone_sig("exclude"), zone_sig("stable"), corr_mode, round(lod, 4), vmax,
                          slip_label, st.session_state.get("map_px"), zone_sig("potential"), zone_sig("collapse"),
@@ -715,10 +711,15 @@ if section == "🗺️ 範圍與剖面線":
     for z, (label, color, _) in ZONES.items():
         feats = st.session_state[f"geo_{z}"]
         if feats:
-            folium.GeoJson({"type": "FeatureCollection", "features": feats}, name=f"已存：{label}",
-                           style_function=lambda _f, c=color: {"color": c, "weight": 3, "fillOpacity": 0.08},
-                           tooltip=label).add_to(m)
-    shape_opts = {"shapeOptions": {"color": ZONES[zone][1]}}
+            stl = ZONE_DRAW_STYLES[z]
+            folium.GeoJson(
+                {"type": "FeatureCollection", "features": feats},
+                name=f"已存：{label}",
+                style_function=lambda _f, s=stl: dict(s),
+                tooltip=label,
+            ).add_to(m)
+    draw_style = ZONE_DRAW_STYLES[zone].copy()
+    shape_opts = {"shapeOptions": draw_style}
     if ZONES[zone][2] == "line":
         draw_opts = dict(polyline=shape_opts, polygon=False, rectangle=False)
     else:
@@ -751,4 +752,4 @@ if section == "🗺️ 範圍與剖面線":
     cnt = {ZONES[z][0]: len(st.session_state[f"geo_{z}"]) + (1 if st.session_state.get(f"up_{z}") else 0)
            for z in ZONES}
     st.write("已儲存數量：" + "　".join(f"**{k}** {v}" for k, v in cnt.items()))
-    st.caption("說明：🔴 實際崩塌範圍只控制崩塌事件統計；🟣 潛在滑動體範圍只控制殘餘土體；DoD 本身永遠先計算整個分析區。堆積區未畫時以潛在滑動體以外全區代替。")
+    st.caption("說明：🔴 實際崩塌範圍只控制已發生崩塌統計；🟠 潛在滑動體範圍只控制殘餘土體；🔵 堆積區控制堆積統計。DoD 本身永遠先計算整個分析區。")
