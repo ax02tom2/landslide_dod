@@ -13,3 +13,4 @@ matplotlib
 Pillow
 openpyxl
 ezdxf
+psycopg[binary]>=3.2,<4
