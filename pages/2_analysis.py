@@ -679,16 +679,20 @@ def build_overlays():
 if section == "🗺️ 範圍與剖面線":
     st.markdown("""<style>
     /* Leaflet Draw 控制點：小而清楚，避免遮住 DoD。 */
+    /* Leaflet Draw 編輯控制點：維持小尺寸，避免遮住影像與 DoD。 */
     .leaflet-editing-icon,
     .leaflet-marker-icon.leaflet-editing-icon,
-    .leaflet-div-icon.leaflet-editing-icon {
-        width: 5px !important;
-        height: 5px !important;
-        margin-left: -2.5px !important;
-        margin-top: -2.5px !important;
+    .leaflet-div-icon.leaflet-editing-icon,
+    .leaflet-marker-icon.leaflet-div-icon.leaflet-editing-icon {
+        width: 4px !important;
+        height: 4px !important;
+        margin-left: -2px !important;
+        margin-top: -2px !important;
+        padding: 0 !important;
         border: 1px solid #ffffff !important;
         border-radius: 1px !important;
-        box-shadow: 0 0 1px rgba(0,0,0,.65) !important;
+        box-sizing: border-box !important;
+        box-shadow: 0 0 1px rgba(0,0,0,.55) !important;
     }
     </style>""", unsafe_allow_html=True)
     zone = st.radio("目前要繪製的類型", list(ZONES), format_func=lambda z: ZONES[z][0], horizontal=True, key="draw_zone")
