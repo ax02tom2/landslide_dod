@@ -540,7 +540,12 @@ if section == "🧱 殘餘土體":
                 min_value=0.1, max_value=200.0, step=0.5, key="d_uni",
             )
             slip_label = f"等深度基準情境 d={depth:g} m（參考：{depth_basis}）"
-        else:
+        elif method == methods[1]:
+            # DoD 幾何推估：只顯示此方法自己的設定，不要顯示上傳滑動面元件。
+            st.info("以實際崩塌（dz < -LoD）的觀測深度，搭配潛在滑動體邊界，幾何內插出滑動面。")
+            st.caption("選擇此方法後，按下「計算殘餘土體」才會執行 DoD 幾何推估。")
+
+        else:  # 上傳滑動面
             up = st.file_uploader("滑動面 GeoTIFF", type=["tif", "tiff"], key="slip_up")
             sp = save_upload(up) or demo_slip
             kind = st.radio("檔案內容", ["高程（m，同 DEM 基準面）", "深度（m，自 T1 地表往下）"], horizontal=True, key="slip_kind")
