@@ -66,14 +66,14 @@ for z in ZONES:
 if not st.session_state.get("user"):
     st.warning("請先登入。")
     if st.button("回到案件管理"):
-        st.page_link("app.py", label="回案件管理", icon="📁")
+        st.page_link("pages/0_cases.py", label="回案件管理", icon="📁")
     st.stop()
 user = st.session_state["user"]
 case_id = st.session_state.get("case_id")
 if not case_id:
     st.warning("請先建立或開啟案件。")
     if st.button("回到案件管理"):
-        st.page_link("app.py", label="回案件管理", icon="📁")
+        st.page_link("pages/0_cases.py", label="回案件管理", icon="📁")
     st.stop()
 case = cm.get_case(user["id"], case_id)
 if not case:
@@ -116,7 +116,7 @@ if st.sidebar.button("① 前處理｜裁切與縮小", width="stretch"):
     st.page_link("pages/1_preprocess.py", label="前往 ① 前處理｜裁切與縮小", icon="✂️")
 if st.sidebar.button("回案件管理", width="stretch"):
     persist_case()
-    st.page_link("app.py", label="回案件管理", icon="📁")
+    st.page_link("pages/0_cases.py", label="回案件管理", icon="📁")
 
 
 
