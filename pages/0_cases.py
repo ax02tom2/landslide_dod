@@ -1,7 +1,8 @@
 """案件管理頁面：登入、建立、開啟與刪除案件。"""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 
@@ -51,7 +52,7 @@ if cases:
     st.markdown("### 我的案件")
     for c in cases:
         col1, col2, col3 = st.columns([5, 2, 1])
-        updated = datetime.fromtimestamp(c["updated_at"]).strftime("%Y-%m-%d %H:%M")
+        updated = datetime.fromtimestamp(c["updated_at"], tz=timezone.utc).astimezone(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M")
         col1.markdown(f"**{c['name']}** · 最後更新：{updated}")
         if c.get("description"):
             col1.caption(c["description"])
