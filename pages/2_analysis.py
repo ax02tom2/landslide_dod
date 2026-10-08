@@ -63,15 +63,15 @@ for z in ZONES:
 # --------------------------------------------------------------------------
 # 小工具
 # --------------------------------------------------------------------------
+# 只在「本次 Streamlit rerun」內快取。
+# 不把大型 raster / PNG / mask 長期放進 session_state，避免互動幾次後記憶體累積而當機。
+_RUN_CACHE = {}
+
 def memo(key, fn):
-    """簡易記憶：避免每次互動都重算大陣列。最多保留 14 筆。"""
-    store = st.session_state.setdefault("_memo", {})
-    if key in store:
-        return store[key]
+    if key in _RUN_CACHE:
+        return _RUN_CACHE[key]
     val = fn()
-    store[key] = val
-    while len(store) > 14:
-        store.pop(next(iter(store)))
+    _RUN_CACHE[key] = val
     return val
 
 
@@ -101,6 +101,79 @@ def region_bbox(mask):
     if len(xx) == 0:
         return None
     return int(yy.min()), int(yy.max()) + 1, int(xx.min()), int(xx.max()) + 1
+
+
+def volume_stats_chunked(dz_arr, lod_, cell_area, mask, sigma=None, rows=512):
+    """低記憶體版 DoD 統計；避免 dz[mask] 一次複製整個分析區。"""
+    A = float(cell_area)
+    n = ne = nd = 0
+    se = sd = 0.0
+    min_e = None
+    max_d = None
+    h, w = dz_arr.shape
+    for r0 in range(0, h, rows):
+        r1 = min(h, r0 + rows)
+        d = dz_arr[r0:r1]
+        m = mask[r0:r1] if mask is not None else np.ones(d.shape, dtype=bool)
+        ok = m & np.isfinite(d)
+        if not ok.any():
+            continue
+        v = d[ok]  # 只複製一小塊
+        n += v.size
+        e = v[v < -lod_]
+        q = v[v > lod_]
+        if e.size:
+            ne += e.size
+            se += float(e.sum(dtype=np.float64))
+            ev = float(e.min())
+            min_e = ev if min_e is None else min(min_e, ev)
+        if q.size:
+            nd += q.size
+            sd += float(q.sum(dtype=np.float64))
+            qv = float(q.max())
+            max_d = qv if max_d is None else max(max_d, qv)
+    ve = -se * A
+    vd = sd * A
+    out = {
+        "區域面積_m2": n * A,
+        "侵蝕面積_m2": ne * A,
+        "堆積面積_m2": nd * A,
+        "侵蝕體積_m3": ve,
+        "堆積體積_m3": vd,
+        "平均侵蝕深_m": (-se / ne) if ne else 0.0,
+        "最大侵蝕深_m": (-min_e) if min_e is not None else 0.0,
+        "平均堆積厚_m": (sd / nd) if nd else 0.0,
+        "最大堆積厚_m": max_d if max_d is not None else 0.0,
+    }
+    out["淨變量_m3"] = vd - ve
+    if sigma is not None and n:
+        out["不確定度_隨機_m3"] = float(sigma * math.sqrt(n) * A)
+        out["不確定度_系統_m3"] = float(sigma * n * A)
+    return out
+
+def scar_depth_hint_sampled(dz_arr, lod_, region, max_values=300_000, rows=512):
+    """低記憶體的崩落深度統計；大區域採均勻抽樣估計中位數/P90。"""
+    total = int(np.count_nonzero(region & np.isfinite(dz_arr) & (dz_arr < -lod_)))
+    if total == 0:
+        return None
+    stride = max(1, int(math.ceil(total / max_values)))
+    vals = []
+    seen = 0
+    h = dz_arr.shape[0]
+    for r0 in range(0, h, rows):
+        r1 = min(h, r0 + rows)
+        d = dz_arr[r0:r1]
+        m = region[r0:r1] & np.isfinite(d) & (d < -lod_)
+        v = (-d[m]).astype(np.float32, copy=False)
+        if v.size:
+            # 以全域序位近似均勻抽樣，避免保存數百萬個值。
+            take = np.arange(0, v.size, stride, dtype=np.int64)
+            vals.append(v[take])
+    x = np.concatenate(vals) if vals else np.empty(0, dtype=np.float32)
+    if x.size > max_values:
+        x = x[:max_values]
+    return {"median": float(np.median(x)), "mean": float(np.mean(x, dtype=np.float64)),
+            "p90": float(np.percentile(x, 90)), "max": float(np.max(x)), "n": total, "sampled": int(x.size)}
 
 
 # --------------------------------------------------------------------------
@@ -181,7 +254,6 @@ if not (p1 and p2):
 # --------------------------------------------------------------------------
 dkey = ("data", p1, p2, factor, nd_override)
 if st.session_state.get("_dkey") != dkey:
-    st.session_state["_memo"] = {}
     st.session_state.pop("_data", None)
     st.session_state["_dkey"] = dkey
 try:
@@ -310,12 +382,8 @@ elif m_potential is not None:
 else:
     dep_region = valid
 
-S_src = core.volume_stats(dz, lod, CA, actual_collapse_region, sigma)
-S_dep = core.volume_stats(dz, lod, CA, dep_region, sigma)
-S_all = core.volume_stats(dz, lod, CA, valid, sigma)
-
 # --------------------------------------------------------------------------
-# 分頁：V4 改用單一目前工作區，避免 Streamlit tabs 同時執行所有大型計算。
+# 分頁：只計算目前工作區需要的統計，避免每次點按鈕都建立大型暫存陣列。
 # --------------------------------------------------------------------------
 section = st.radio(
     "分析工作區",
@@ -323,6 +391,13 @@ section = st.radio(
     horizontal=True,
     key="analysis_section",
 )
+S_src = S_dep = S_all = None
+if section in ("📊 差異與量體", "💾 匯出"):
+    S_src = volume_stats_chunked(dz, lod, CA, actual_collapse_region, sigma)
+    S_dep = volume_stats_chunked(dz, lod, CA, dep_region, sigma)
+    S_all = volume_stats_chunked(dz, lod, CA, valid, sigma)
+elif section == "🧱 殘餘土體":
+    S_dep = volume_stats_chunked(dz, lod, CA, dep_region, sigma)
 
 # ======================= 差異與量體 =======================
 if section == "📊 差異與量體":
@@ -425,7 +500,7 @@ if section == "🧱 殘餘土體":
     if m_potential is None:
         st.warning("請先到「範圍與剖面線」圈繪完整的「潛在滑動體範圍」。本頁不會在未定義範圍時自動對整張 DEM 計算。")
     else:
-        hint = core.scar_depth_hint(dz, lod, actual_collapse_region)
+        hint = scar_depth_hint_sampled(dz, lod, actual_collapse_region)
         if hint:
             st.markdown("#### 已崩落深度統計參考（DoD 實測，不是滑動面深度）")
             hc = st.columns(4)
@@ -484,16 +559,32 @@ if section == "🧱 殘餘土體":
         if st.button("▶ 計算殘餘土體", type="primary", disabled=bool(err), key="calc_residual"):
             try:
                 region = potential_region
-                z2c = (z2 - corr).astype("float32")
                 if method == methods[0]:
-                    vals = dz[region & np.isfinite(dz)].astype("float64")
-                    t = np.maximum(vals + float(depth), 0.0)
-                    pos = t[t > 0]
-                    result = {"sig":res_sig, "method":"uniform", "depth":float(depth),
-                              "slip_label":slip_label, "volume":float(t.sum()*CA),
-                              "area":float(len(pos)*CA), "region_area":float(len(vals)*CA),
-                              "mean":float(pos.mean()) if len(pos) else 0.0, "max":float(pos.max()) if len(pos) else 0.0}
+                    # 分塊計算：不建立整張 vals/t 暫存陣列，避免大 DEM 在按鈕計算時瞬間吃滿 RAM。
+                    d0 = float(depth)
+                    total_v = total_pos = total_sum = 0.0
+                    total_n = 0
+                    max_t = 0.0
+                    for r0 in range(0, dz.shape[0], 512):
+                        r1 = min(dz.shape[0], r0 + 512)
+                        dd = dz[r0:r1]
+                        rr = region[r0:r1] & np.isfinite(dd)
+                        if not rr.any():
+                            continue
+                        vv = dd[rr].astype(np.float32, copy=False)
+                        tt = np.maximum(vv + d0, 0.0)
+                        total_v += float(tt.sum(dtype=np.float64))
+                        total_pos += float(np.count_nonzero(tt > 0))
+                        total_sum += float(tt[tt > 0].sum(dtype=np.float64)) if np.any(tt > 0) else 0.0
+                        total_n += vv.size
+                        if tt.size:
+                            max_t = max(max_t, float(tt.max()))
+                    result = {"sig":res_sig, "method":"uniform", "depth":d0,
+                              "slip_label":slip_label, "volume":total_v*CA,
+                              "area":total_pos*CA, "region_area":total_n*CA,
+                              "mean":(total_sum/total_pos) if total_pos else 0.0, "max":max_t}
                 elif method == methods[1]:
+                    z2c = (z2 - corr).astype("float32")
                     n_region = int(region.sum())
                     if n_region > 4_000_000:
                         raise ValueError("目前分析網格仍過大（潛在滑動體超過 400 萬格）。請先把左側「降採樣倍率」提高到 6～8 倍，再執行 DoD 幾何推估；這可避免 Streamlit 記憶體不足而整頁當機。")
@@ -502,6 +593,7 @@ if section == "🧱 殘餘土體":
                     rs = core.residual_summary(thick_arr, CA, region)
                     result = {"sig":res_sig, "method":"raster", "slip":slip_arr, "thick":thick_arr, "slip_label":"DoD 幾何推估滑動面（研究性）", **{"volume":rs["殘餘土體體積_m3"],"area":rs["有殘餘土體面積_m2"],"region_area":rs["範圍面積_m2"],"mean":rs["平均厚度_m"],"max":rs["最大厚度_m"]}}
                 else:
+                    z2c = (z2 - corr).astype("float32")
                     sp = save_upload(st.session_state.get("slip_up")) or demo_slip
                     if not sp: raise ValueError("請上傳滑動面 GeoTIFF。")
                     if int(region.sum()) > 4_000_000:
@@ -540,17 +632,26 @@ if section == "🧱 殘餘土體":
             dmax = sc[1].number_input("最大情境深度 (m)", 0.2, 200.0, sens_max_default, 0.5, key="s_max")
             dstep = sc[2].number_input("情境間隔 (m)", 0.1, 20.0, 0.5, 0.1, key="s_step")
             if st.button("▶ 執行敏感度分析", key="run_sensitivity"):
-                vals = dz[potential_region & np.isfinite(dz)].astype("float64")
                 depths = np.arange(dmin, dmax + 1e-9, dstep)[:60]
-                # 使用排序後的累積和，避免每個深度都對整個 raster 重新掃描。
-                vals.sort()
-                csum = np.concatenate(([0.0], np.cumsum(vals, dtype="float64")))
-                rows=[]
-                for dd in depths:
-                    k = int(np.searchsorted(vals, -dd, side="left"))
-                    # vals[:k] <= -d => max(d+v,0)=0; vals[k:] contribute.
-                    vol = (dd*(len(vals)-k) + (csum[-1]-csum[k])) * CA
-                    rows.append({"假設滑動面深度_m":float(dd),"殘餘體積_m3":float(vol),"殘餘面積_m2":float((len(vals)-k)*CA)})
+                # 分塊累計：避免 vals.sort()/cumsum() 建立數百 MB 的暫存陣列。
+                vol_sum = np.zeros(len(depths), dtype=np.float64)
+                pos_n = np.zeros(len(depths), dtype=np.int64)
+                for r0 in range(0, dz.shape[0], 512):
+                    r1 = min(dz.shape[0], r0 + 512)
+                    dd0 = dz[r0:r1]
+                    rr = potential_region[r0:r1] & np.isfinite(dd0)
+                    if not rr.any():
+                        continue
+                    vv = dd0[rr].astype(np.float32, copy=False)
+                    for j, dd in enumerate(depths):
+                        tt = vv + float(dd)
+                        pos = tt > 0
+                        if np.any(pos):
+                            vol_sum[j] += float(tt[pos].sum(dtype=np.float64))
+                            pos_n[j] += int(np.count_nonzero(pos))
+                rows=[{"假設滑動面深度_m":float(dd),
+                       "殘餘體積_m3":float(vol_sum[j]*CA),
+                       "殘餘面積_m2":float(pos_n[j]*CA)} for j, dd in enumerate(depths)]
                 st.session_state["sensitivity_result"] = {"sig":res_sig,"df":pd.DataFrame(rows)}
             sr = st.session_state.get("sensitivity_result")
             if sr and sr.get("sig") == res_sig:
