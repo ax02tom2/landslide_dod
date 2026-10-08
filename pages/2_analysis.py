@@ -666,9 +666,35 @@ def build_overlays():
 
 
 if section == "🗺️ 範圍與剖面線":
-    st.markdown("""<style>
-    .leaflet-editing-icon { width: 6px !important; height: 6px !important; margin-left: -3px !important; margin-top: -3px !important; border: 1px solid #ffffff !important; }
-    </style>""", unsafe_allow_html=True)
+    st.markdown("""
+<style>
+/* Leaflet Draw 編輯控制點 */
+.leaflet-editing-icon,
+.leaflet-marker-icon.leaflet-editing-icon {
+    width: 4px !important;
+    height: 4px !important;
+    margin-left: -2px !important;
+    margin-top: -2px !important;
+    border: 1px solid #ffffff !important;
+    border-radius: 1px !important;
+}
+
+/* 編輯中的頂點 */
+.leaflet-div-icon.leaflet-editing-icon {
+    width: 4px !important;
+    height: 4px !important;
+    margin-left: -2px !important;
+    margin-top: -2px !important;
+    border: 1px solid #ffffff !important;
+    background: #ffffff !important;
+}
+
+/* Leaflet Draw 預設頂點 */
+.leaflet-marker-icon.leaflet-div-icon {
+    box-sizing: border-box !important;
+}
+</style>
+""", unsafe_allow_html=True)
     zone = st.radio("目前要繪製的類型", list(ZONES), format_func=lambda z: ZONES[z][0], horizontal=True, key="draw_zone")
     st.caption("🔴 實際崩塌範圍＝控制崩塌事件統計；🟣 潛在滑動體範圍＝控制殘餘土體；DoD 本身不受這兩個範圍限制。畫完後按「💾 儲存」。")
     with st.spinner("準備地圖圖層…"):
