@@ -28,6 +28,7 @@ from streamlit_folium import st_folium
 
 import core
 import demo_data
+import case_manager as cm
 
 st.set_page_config(page_title="崩塌地形變異分析", page_icon="⛰️", layout="wide")
 
@@ -41,7 +42,7 @@ ZONES = {
     "deposit": ("堆積區", "#1565c0", "polygon"),
     "stable": ("穩定區 (校正用)", "#2e7d32", "polygon"),
     "exclude": ("排除區 (植被/水體/建物)", "#616161", "polygon"),
-    "profile": ("剖面線", "#f9a825", "line"),
+    "profile": ("剖面線", "#7b1fa2", "line"),
 }
 
 # 工程 GIS 圖徵樣式：實際崩塌用實線、潛在滑動體用虛線、堆積區用藍色。
@@ -51,7 +52,7 @@ ZONE_DRAW_STYLES = {
     "deposit": {"color": "#1565c0", "weight": 3.0, "opacity": 0.95, "fillColor": "#1565c0", "fillOpacity": 0.10},
     "stable": {"color": "#2e7d32", "weight": 2.5, "opacity": 0.9, "fillColor": "#2e7d32", "fillOpacity": 0.06, "dashArray": "6 4"},
     "exclude": {"color": "#616161", "weight": 2.5, "opacity": 0.9, "fillColor": "#616161", "fillOpacity": 0.05, "dashArray": "4 4"},
-    "profile": {"color": "#f9a825", "weight": 3.0, "opacity": 0.95},
+    "profile": {"color": "#7b1fa2", "weight": 3.5, "opacity": 0.95},
 }
 POLY_ZONES = [z for z, v in ZONES.items() if v[2] == "polygon"]
 
@@ -59,25 +60,89 @@ for z in ZONES:
     st.session_state.setdefault(f"geo_{z}", [])  # 已儲存的 GeoJSON features (WGS84)
     st.session_state.setdefault(f"ver_{z}", 0)  # 地圖版本（儲存後重置繪圖層）
 
+# --------------------------------------------------------------------------
+# 使用者 / 案件管理
+# --------------------------------------------------------------------------
+if not st.session_state.get("user"):
+    st.warning("請先登入。")
+    if st.button("回到案件管理"):
+        st.page_link("pages/0_cases.py", label="回案件管理", icon="📁")
+    st.stop()
+user = st.session_state["user"]
+case_id = st.session_state.get("case_id")
+if not case_id:
+    st.warning("請先建立或開啟案件。")
+    if st.button("回到案件管理"):
+        st.page_link("pages/0_cases.py", label="回案件管理", icon="📁")
+    st.stop()
+case = cm.get_case(user["id"], case_id)
+if not case:
+    st.error("案件不存在或你沒有存取權限。")
+    st.stop()
+case_files = dict(case.get("files") or {})
+case_state = dict(case.get("state") or {})
+
+if st.session_state.get("_loaded_case_id") != case_id:
+    for _k in [f"geo_{z}" for z in ZONES] + [f"ver_{z}" for z in ZONES] + ["residual_result", "sensitivity_result", "exports", "_dkey", "_data", "_depth_hint"]:
+        st.session_state.pop(_k, None)
+    for _z in ZONES:
+        st.session_state[f"geo_{_z}"] = list((case_state.get("zones") or {}).get(_z, []))
+        st.session_state[f"ver_{_z}"] = 0
+    for _k, _v in (case_state.get("settings") or {}).items():
+        if _v is not None:
+            st.session_state[_k] = _v
+    st.session_state["_loaded_case_id"] = case_id
+
+
+def persist_case(extra_state=None):
+    settings_keys = ["factor", "nd_txt", "corr_label", "lod", "map_px", "vmax", "bulk", "analysis_section", "draw_zone", "slip_method", "depth_basis", "d_uni", "slip_kind", "slip_fb", "d_fb", "s_min", "s_max", "s_step", "pstep", "ve", "use_manual", "collapse_region_choice", "potential_region_choice", "e1", "n1", "e2", "n2"]
+    settings = {k: st.session_state.get(k) for k in settings_keys if k in st.session_state}
+    zones = {z: st.session_state.get(f"geo_{z}", []) for z in ZONES}
+    state = dict(case_state)
+    state["zones"] = zones
+    state["settings"] = settings
+    if extra_state:
+        state.update(extra_state)
+    return cm.update_case(user["id"], case_id, state=state, files=case_files)
+
+
+st.sidebar.markdown(f"### 📁 {case['name']}")
+st.sidebar.caption(f"使用者：{user['username']}")
+if st.sidebar.button("💾 儲存目前案件", width="stretch"):
+    persist_case()
+    st.sidebar.success("案件已儲存")
+if st.sidebar.button("① 前處理｜裁切與縮小", width="stretch"):
+    persist_case()
+    st.page_link("pages/1_preprocess.py", label="前往 ① 前處理｜裁切與縮小", icon="✂️")
+if st.sidebar.button("回案件管理", width="stretch"):
+    persist_case()
+    st.page_link("pages/0_cases.py", label="回案件管理", icon="📁")
+
+
 
 # --------------------------------------------------------------------------
 # 小工具
 # --------------------------------------------------------------------------
+# 只在「本次 Streamlit rerun」內快取。
+# 不把大型 raster / PNG / mask 長期放進 session_state，避免互動幾次後記憶體累積而當機。
+_RUN_CACHE = {}
+
 def memo(key, fn):
-    """簡易記憶：避免每次互動都重算大陣列。最多保留 14 筆。"""
-    store = st.session_state.setdefault("_memo", {})
-    if key in store:
-        return store[key]
+    if key in _RUN_CACHE:
+        return _RUN_CACHE[key]
     val = fn()
-    store[key] = val
-    while len(store) > 14:
-        store.pop(next(iter(store)))
+    _RUN_CACHE[key] = val
     return val
 
 
-def save_upload(uf):
+def save_upload(uf, role=None):
     if uf is None:
         return None
+    if role:
+        path = cm.save_uploaded_file(user["id"], case_id, uf, role)
+        case_files[role] = path
+        cm.update_case(user["id"], case_id, files=case_files)
+        return path
     buf = uf.getbuffer()
     h = hashlib.md5(f"{uf.name}{uf.size}".encode() + bytes(buf[:1 << 20]) + bytes(buf[-(1 << 20):])).hexdigest()[:12]
     path = os.path.join(TMP, f"{h}_{os.path.basename(uf.name)}")
@@ -103,6 +168,79 @@ def region_bbox(mask):
     return int(yy.min()), int(yy.max()) + 1, int(xx.min()), int(xx.max()) + 1
 
 
+def volume_stats_chunked(dz_arr, lod_, cell_area, mask, sigma=None, rows=512):
+    """低記憶體版 DoD 統計；避免 dz[mask] 一次複製整個分析區。"""
+    A = float(cell_area)
+    n = ne = nd = 0
+    se = sd = 0.0
+    min_e = None
+    max_d = None
+    h, w = dz_arr.shape
+    for r0 in range(0, h, rows):
+        r1 = min(h, r0 + rows)
+        d = dz_arr[r0:r1]
+        m = mask[r0:r1] if mask is not None else np.ones(d.shape, dtype=bool)
+        ok = m & np.isfinite(d)
+        if not ok.any():
+            continue
+        v = d[ok]  # 只複製一小塊
+        n += v.size
+        e = v[v < -lod_]
+        q = v[v > lod_]
+        if e.size:
+            ne += e.size
+            se += float(e.sum(dtype=np.float64))
+            ev = float(e.min())
+            min_e = ev if min_e is None else min(min_e, ev)
+        if q.size:
+            nd += q.size
+            sd += float(q.sum(dtype=np.float64))
+            qv = float(q.max())
+            max_d = qv if max_d is None else max(max_d, qv)
+    ve = -se * A
+    vd = sd * A
+    out = {
+        "區域面積_m2": n * A,
+        "侵蝕面積_m2": ne * A,
+        "堆積面積_m2": nd * A,
+        "侵蝕體積_m3": ve,
+        "堆積體積_m3": vd,
+        "平均侵蝕深_m": (-se / ne) if ne else 0.0,
+        "最大侵蝕深_m": (-min_e) if min_e is not None else 0.0,
+        "平均堆積厚_m": (sd / nd) if nd else 0.0,
+        "最大堆積厚_m": max_d if max_d is not None else 0.0,
+    }
+    out["淨變量_m3"] = vd - ve
+    if sigma is not None and n:
+        out["不確定度_隨機_m3"] = float(sigma * math.sqrt(n) * A)
+        out["不確定度_系統_m3"] = float(sigma * n * A)
+    return out
+
+def scar_depth_hint_sampled(dz_arr, lod_, region, max_values=300_000, rows=512):
+    """低記憶體的崩落深度統計；大區域採均勻抽樣估計中位數/P90。"""
+    total = int(np.count_nonzero(region & np.isfinite(dz_arr) & (dz_arr < -lod_)))
+    if total == 0:
+        return None
+    stride = max(1, int(math.ceil(total / max_values)))
+    vals = []
+    seen = 0
+    h = dz_arr.shape[0]
+    for r0 in range(0, h, rows):
+        r1 = min(h, r0 + rows)
+        d = dz_arr[r0:r1]
+        m = region[r0:r1] & np.isfinite(d) & (d < -lod_)
+        v = (-d[m]).astype(np.float32, copy=False)
+        if v.size:
+            # 以全域序位近似均勻抽樣，避免保存數百萬個值。
+            take = np.arange(0, v.size, stride, dtype=np.int64)
+            vals.append(v[take])
+    x = np.concatenate(vals) if vals else np.empty(0, dtype=np.float32)
+    if x.size > max_values:
+        x = x[:max_values]
+    return {"median": float(np.median(x)), "mean": float(np.mean(x, dtype=np.float64)),
+            "p90": float(np.percentile(x, 90)), "max": float(np.max(x)), "n": total, "sampled": int(x.size)}
+
+
 # --------------------------------------------------------------------------
 # 側邊欄：資料與設定
 # --------------------------------------------------------------------------
@@ -118,9 +256,9 @@ if st.session_state.get("demo") and sb.button("結束範例模式", width="stret
     st.rerun()
 
 sb.caption(f"目前單檔上傳上限：{int(st.get_option('server.maxUploadSize'))} MB")
-f1 = sb.file_uploader("T1（崩塌前）DEM/DSM GeoTIFF", type=["tif", "tiff"], key="f1")
-f2 = sb.file_uploader("T2（崩塌後）DEM/DSM GeoTIFF", type=["tif", "tiff"], key="f2")
-fo = sb.file_uploader("正射影像 GeoTIFF（選用，僅作底圖）", type=["tif", "tiff"], key="fo")
+f1 = sb.file_uploader("T1（崩塌前）DEM/DSM GeoTIFF", type=["tif", "tiff"], key=f"f1_{case_id}")
+f2 = sb.file_uploader("T2（崩塌後）DEM/DSM GeoTIFF", type=["tif", "tiff"], key=f"f2_{case_id}")
+fo = sb.file_uploader("正射影像 GeoTIFF（選用，僅作底圖）", type=["tif", "tiff"], key=f"fo_{case_id}")
 
 if st.session_state.get("demo"):
     if "_demo_paths" not in st.session_state:
@@ -141,18 +279,21 @@ else:
     lp1 = _local("T1 本機路徑", "lp1")
     lp2 = _local("T2 本機路徑", "lp2")
     lpo = _local("正射影像 本機路徑", "lpo")
-    p1 = lp1 or save_upload(f1)
-    p2 = lp2 or save_upload(f2)
-    po = lpo or save_upload(fo)
+    p1 = lp1 or save_upload(f1, "t1") or case_files.get("t1")
+    p2 = lp2 or save_upload(f2, "t2") or case_files.get("t2")
+    po = lpo or save_upload(fo, "ortho") or case_files.get("ortho")
     demo_slip = None
     pre = st.session_state.get("pre")
     if pre and not (p1 or p2):
         p1, p2, po = pre.get("t1"), pre.get("t2"), pre.get("ortho")
+        p1 = p1 or case_files.get("t1")
+        p2 = p2 or case_files.get("t2")
+        po = po or case_files.get("ortho")
         sb.success("使用「前處理」的裁切成果（左側 **① 前處理｜裁切與縮小** 可重新裁切）")
 
 sb.header("2. 計算設定")
-factor = sb.slider("降採樣倍率", 1, 20, 4, help="倍率越高越省記憶體、較不容易因大檔當機，但空間解析度會降低。建議大範圍資料先用 4 倍。")
-nd_txt = sb.text_input("額外 NoData 值（選用）", "", help="若 DEM 未宣告 NoData 但用 -9999 之類填空，請在此輸入。")
+factor = sb.slider("降採樣倍率", 1, 20, int(st.session_state.get("factor", 4)), key="factor", help="倍率越高越省記憶體、較不容易因大檔當機，但空間解析度會降低。建議大範圍資料先用 4 倍。")
+nd_txt = sb.text_input("額外 NoData 值（選用）", str(st.session_state.get("nd_txt", "")), key="nd_txt", help="若 DEM 未宣告 NoData 但用 -9999 之類填空，請在此輸入。")
 try:
     nd_override = float(nd_txt) if nd_txt.strip() else None
 except ValueError:
@@ -162,7 +303,8 @@ except ValueError:
 corr_label = sb.radio(
     "兩期對位校正（需先畫穩定區）",
     ["不校正", "平移（中位數）", "平面（平移＋傾斜）"],
-    index=0,
+    index=["不校正", "平移（中位數）", "平面（平移＋傾斜）"].index(st.session_state.get("corr_label", "不校正")),
+    key="corr_label",
     help="穩定區 = 兩期之間地形沒有變動的地方（岩盤、道路、建物屋頂等）。",
 )
 corr_mode = {"不校正": "none", "平移（中位數）": "offset", "平面（平移＋傾斜）": "plane"}[corr_label]
@@ -181,7 +323,6 @@ if not (p1 and p2):
 # --------------------------------------------------------------------------
 dkey = ("data", p1, p2, factor, nd_override)
 if st.session_state.get("_dkey") != dkey:
-    st.session_state["_memo"] = {}
     st.session_state.pop("_data", None)
     st.session_state["_dkey"] = dkey
 try:
@@ -215,7 +356,7 @@ with sb.expander("資料資訊"):
 with sb.expander("3. 範圍檔上傳（選用；也可在地圖上畫）"):
     st.caption("支援 GeoJSON、或 shapefile 壓縮成 .zip。需含座標系統。")
     for z in POLY_ZONES:
-        st.file_uploader(ZONES[z][0], type=["geojson", "json", "zip"], key=f"up_{z}")
+        st.file_uploader(ZONES[z][0], type=["geojson", "json", "zip"], key=f"up_{z}_{case_id}")
 
 
 def read_vector_geoms(uf):
@@ -230,7 +371,7 @@ def read_vector_geoms(uf):
 
 def zone_sig(z):
     feats = json.dumps(st.session_state[f"geo_{z}"], sort_keys=True)
-    uf = st.session_state.get(f"up_{z}")
+    uf = st.session_state.get(f"up_{z}_{case_id}")
     return hashlib.md5((feats + (f"{uf.name}{uf.size}" if uf else "")).encode()).hexdigest()
 
 
@@ -239,7 +380,7 @@ def zone_geoms(z):
     for f in st.session_state[f"geo_{z}"]:
         if f["geometry"]["type"] in ("Polygon", "MultiPolygon"):
             geoms.append(transform_geom("EPSG:4326", grid.crs, f["geometry"]))
-    uf = st.session_state.get(f"up_{z}")
+    uf = st.session_state.get(f"up_{z}_{case_id}")
     if uf is not None:
         try:
             geoms += read_vector_geoms(uf)
@@ -254,6 +395,78 @@ def zone_mask(z):
 
 m_collapse, m_potential, m_dep, m_stab, m_exc = (zone_mask(z) for z in ("collapse", "potential", "deposit", "stable", "exclude"))
 valid = valid0 & ~m_exc if m_exc is not None else valid0
+
+# --------------------------------------------------------------------------
+# 多區塊分析選擇
+# --------------------------------------------------------------------------
+# 同一類型可以畫多個區塊。這裡不再把所有 polygon 強制合併，
+# 而是讓使用者像選擇剖面線一樣，指定目前要分析哪一塊。
+def zone_choice_options(z, none_label):
+    geoms = zone_geoms(z)
+    if not geoms:
+        return [none_label]
+    return ["全部"] + [f"{ZONES[z][0]} {i + 1}" for i in range(len(geoms))]
+
+
+def selected_zone_mask(z, choice):
+    geoms = zone_geoms(z)
+    if not geoms:
+        return None
+    if choice == "全部":
+        return memo(("selected_zone_all", z, zone_sig(z), dkey),
+                    lambda: core.rasterize(geoms, grid.shape, grid.transform))
+    prefix = f"{ZONES[z][0]} "
+    if choice.startswith(prefix):
+        try:
+            idx = int(choice[len(prefix):]) - 1
+        except ValueError:
+            idx = -1
+        if 0 <= idx < len(geoms):
+            return memo(("selected_zone_one", z, zone_sig(z), idx, dkey),
+                        lambda: core.rasterize([geoms[idx]], grid.shape, grid.transform))
+    return None
+
+
+collapse_options = zone_choice_options("collapse", "未圈繪（依 DoD 自動偵測）")
+potential_options = zone_choice_options("potential", "未圈繪")
+
+# 與剖面線一致：有多塊時可指定目前分析對象；「全部」保留原本整體分析。
+if len(collapse_options) > 1:
+    old_choice = st.session_state.get("collapse_region_choice", "全部")
+    if old_choice not in collapse_options:
+        old_choice = "全部"
+    st.sidebar.selectbox(
+        "🔴 實際崩塌分析範圍",
+        collapse_options,
+        index=collapse_options.index(old_choice),
+        key="collapse_region_choice",
+        help="可選擇全部崩塌區，或只分析其中一塊。崩塌統計與 DoD 深度參考會跟著選擇。"
+    )
+else:
+    st.session_state["collapse_region_choice"] = collapse_options[0]
+
+if len(potential_options) > 1:
+    old_choice = st.session_state.get("potential_region_choice", "全部")
+    if old_choice not in potential_options:
+        old_choice = "全部"
+    st.sidebar.selectbox(
+        "🟠 潛在滑動體分析範圍",
+        potential_options,
+        index=potential_options.index(old_choice),
+        key="potential_region_choice",
+        help="可選擇全部潛在滑動體，或只分析其中一塊。殘餘土體與敏感度分析會跟著選擇。"
+    )
+else:
+    st.session_state["potential_region_choice"] = potential_options[0]
+
+selected_collapse = selected_zone_mask(
+    "collapse",
+    st.session_state["collapse_region_choice"]
+) if m_collapse is not None else None
+selected_potential = selected_zone_mask(
+    "potential",
+    st.session_state["potential_region_choice"]
+) if m_potential is not None else None
 
 # --------------------------------------------------------------------------
 # 差分 + 對位校正
@@ -291,15 +504,20 @@ if sigma is not None:
     sb.button("套用建議 LoD", on_click=lambda: st.session_state.update(lod=round(sugg, 2)))
 else:
     sb.caption("畫出「穩定區」後，這裡會給 LoD 建議值。")
-sb.select_slider("地圖預覽解析度（px，越小越不易卡）", options=[500, 700, 900, 1200, 1600], value=900, key="map_px")
+sb.select_slider("地圖預覽解析度（px，越小越不易卡）", options=[500, 700, 900, 1200, 1600], value=int(st.session_state.get("map_px", 900)), key="map_px")
 sb.number_input("色階範圍 ±(m)", 0.5, 100.0, 5.0, 0.5, key="vmax")
 vmax = float(st.session_state["vmax"])
 
 # 範圍定義
-# DoD 永遠先在整個有效分析區計算；兩種圈繪範圍只控制後續統計/殘餘分析。
-potential_region = (m_potential & valid) if m_potential is not None else None
+# DoD 永遠先在整個有效分析區計算；選定的圈繪範圍控制後續統計/殘餘分析。
+if m_potential is not None:
+    potential_region = (selected_potential & valid) if selected_potential is not None else (m_potential & valid)
+else:
+    potential_region = None
+
 if m_collapse is not None:
-    actual_collapse_region = (m_collapse & valid) & (dz < -lod)
+    collapse_base = selected_collapse if selected_collapse is not None else m_collapse
+    actual_collapse_region = (collapse_base & valid) & (dz < -lod)
 else:
     actual_collapse_region = valid & (dz < -lod)
 
@@ -310,12 +528,8 @@ elif m_potential is not None:
 else:
     dep_region = valid
 
-S_src = core.volume_stats(dz, lod, CA, actual_collapse_region, sigma)
-S_dep = core.volume_stats(dz, lod, CA, dep_region, sigma)
-S_all = core.volume_stats(dz, lod, CA, valid, sigma)
-
 # --------------------------------------------------------------------------
-# 分頁：V4 改用單一目前工作區，避免 Streamlit tabs 同時執行所有大型計算。
+# 分頁：只計算目前工作區需要的統計，避免每次點按鈕都建立大型暫存陣列。
 # --------------------------------------------------------------------------
 section = st.radio(
     "分析工作區",
@@ -323,9 +537,20 @@ section = st.radio(
     horizontal=True,
     key="analysis_section",
 )
+S_src = S_dep = S_all = None
+if section in ("📊 差異與量體", "💾 匯出"):
+    S_src = volume_stats_chunked(dz, lod, CA, actual_collapse_region, sigma)
+    S_dep = volume_stats_chunked(dz, lod, CA, dep_region, sigma)
+    S_all = volume_stats_chunked(dz, lod, CA, valid, sigma)
+elif section == "🧱 殘餘土體":
+    S_dep = volume_stats_chunked(dz, lod, CA, dep_region, sigma)
 
 # ======================= 差異與量體 =======================
 if section == "📊 差異與量體":
+    st.info(
+        f"目前分析：實際崩塌＝{st.session_state.get('collapse_region_choice', '全部')}；"
+        f"潛在滑動體＝{st.session_state.get('potential_region_choice', '全部')}"
+    )
     if m_collapse is None:
         st.info("未圈繪「實際崩塌範圍」：目前以整個有效分析區的 DoD（dz < -LoD）自動統計。若只要統計特定崩塌事件，可圈繪實際崩塌範圍。")
     c = st.columns(4)
@@ -393,6 +618,20 @@ if section == "📊 差異與量體":
         fs.update_layout(title="穩定區 dz 分布（應接近 0）", xaxis_title="dz (m)", height=300, margin=dict(t=40, b=30))
         h2.plotly_chart(fs, width="stretch")
 
+# 基準深度參考 → 下方數值同步
+def _sync_depth_from_basis():
+    hint_ = st.session_state.get("_depth_hint")
+    basis_ = st.session_state.get("depth_basis", "自訂")
+    if basis_.startswith("中位數") and hint_:
+        v = hint_["median"]
+    elif basis_ == "平均" and hint_:
+        v = hint_["mean"]
+    elif basis_.startswith("P90") and hint_:
+        v = hint_["p90"]
+    else:
+        v = 2.0
+    st.session_state["d_uni"] = max(round(float(v), 1), 0.5)
+
 # ======================= 殘餘土體 =======================
 slip = None
 thick = None
@@ -400,6 +639,10 @@ res_sum = None
 sens_df = None
 slip_label = ""
 if section == "🧱 殘餘土體":
+    st.info(
+        f"目前殘餘土體分析：潛在滑動體＝{st.session_state.get('potential_region_choice', '全部')}；"
+        f"崩塌深度參考＝{st.session_state.get('collapse_region_choice', '全部')}"
+    )
     st.markdown("### A. 堆積土體（崩落後堆積在坡腳）")
     ca = st.columns(4)
     ca[0].metric("堆積體積", fmt_m3(S_dep["堆積體積_m3"]))
@@ -408,10 +651,13 @@ if section == "🧱 殘餘土體":
     ca[3].metric("最大堆積厚", f"{S_dep['最大堆積厚_m']:.2f} m")
 
     st.markdown("### B. 潛在滑動體內殘餘不穩定土體")
+    if case_state.get("residual_summary") and st.session_state.get("residual_result") is None:
+        rs0 = case_state["residual_summary"]
+        st.info(f"本案件已保存上次計算摘要：殘餘土體 {fmt_m3(float(rs0.get('volume', 0)))}、有殘餘土體面積 {fmt_m2(float(rs0.get('area', 0)))}。若修改了範圍或設定，請重新計算。")
     if m_potential is None:
         st.warning("請先到「範圍與剖面線」圈繪完整的「潛在滑動體範圍」。本頁不會在未定義範圍時自動對整張 DEM 計算。")
     else:
-        hint = core.scar_depth_hint(dz, lod, actual_collapse_region)
+        hint = scar_depth_hint_sampled(dz, lod, actual_collapse_region)
         if hint:
             st.markdown("#### 已崩落深度統計參考（DoD 實測，不是滑動面深度）")
             hc = st.columns(4)
@@ -430,49 +676,80 @@ if section == "🧱 殘餘土體":
         if method == methods[0]:
             opts = ["中位數（建議基準情境）", "平均", "P90（較保守情境）", "自訂"]
             default_opt = 0 if hint else 3
-            depth_basis = st.selectbox("基準深度參考", opts, index=default_opt, key="depth_basis")
-            if depth_basis.startswith("中位數") and hint:
-                d_default = round(hint["median"], 1)
-            elif depth_basis == "平均" and hint:
-                d_default = round(hint["mean"], 1)
-            elif depth_basis.startswith("P90") and hint:
-                d_default = round(hint["p90"], 1)
-            else:
-                d_default = 2.0
-            depth = st.number_input("基準滑動面深度 d (m，自 T1 地表往下)", 0.1, 200.0, max(d_default, 0.5), 0.5, key="d_uni")
+            if "depth_basis" not in st.session_state:
+                st.session_state["depth_basis"] = opts[default_opt]
+            if "d_uni" not in st.session_state:
+                if hint:
+                    st.session_state["d_uni"] = max(round(float(hint["median"]), 1), 0.5)
+                else:
+                    st.session_state["d_uni"] = 2.0
+            st.session_state["_depth_hint"] = hint
+            depth_basis = st.selectbox(
+                "基準深度參考",
+                opts,
+                key="depth_basis",
+                on_change=_sync_depth_from_basis,
+                help="選擇中位數、平均或 P90 後，下方深度會同步帶入該數值；帶入後仍可手動修改。",
+            )
+            st.caption("選擇參考值後會同步帶入下方；下方數字仍可自行調整。")
+            depth = st.number_input(
+                "滑動面深度 d（m，自 T1 地表往下）",
+                min_value=0.1, max_value=200.0, step=0.5, key="d_uni",
+            )
             slip_label = f"等深度基準情境 d={depth:g} m（參考：{depth_basis}）"
-            st.info("這個深度是工程情境假設，不是由 DoD 直接量測出的真實地下滑動面。")
         elif method == methods[1]:
-            st.info("此方法為研究性幾何推估，只有按下計算後才會執行，避免進入頁面即大量耗用記憶體。")
-        else:
-            up = st.file_uploader("滑動面 GeoTIFF", type=["tif", "tiff"], key="slip_up")
-            sp = save_upload(up) or demo_slip
+            # DoD 幾何推估：只顯示此方法自己的設定，不要顯示上傳滑動面元件。
+            st.info("以實際崩塌（dz < -LoD）的觀測深度，搭配潛在滑動體邊界，幾何內插出滑動面。")
+            st.caption("選擇此方法後，按下「計算殘餘土體」才會執行 DoD 幾何推估。")
+
+        else:  # 上傳滑動面
+            up = st.file_uploader("滑動面 GeoTIFF", type=["tif", "tiff"], key=f"slip_up_{case_id}")
+            sp = save_upload(up, "slip_surface") or case_files.get("slip_surface") or demo_slip
             kind = st.radio("檔案內容", ["高程（m，同 DEM 基準面）", "深度（m，自 T1 地表往下）"], horizontal=True, key="slip_kind")
             fb = st.checkbox("滑動面缺值處，以等深度假設補足", value=True, key="slip_fb")
             d_fb = st.number_input("補足用深度 (m)", 0.1, 200.0, 2.0, 0.5, key="d_fb", disabled=not fb)
             if sp is None:
                 err = "請上傳滑動面 GeoTIFF。"
 
-        res_sig = (dkey, zone_sig("potential"), zone_sig("collapse"), zone_sig("exclude"), corr_mode, round(lod,4), method,
-                   depth, depth_basis, st.session_state.get("slip_up").name if st.session_state.get("slip_up") else None,
+        res_sig = (dkey, zone_sig("potential"), zone_sig("collapse"), zone_sig("exclude"),
+                    st.session_state.get("potential_region_choice"),
+                    st.session_state.get("collapse_region_choice"),
+                    corr_mode, round(lod,4), method,
+                   depth, depth_basis, st.session_state.get(f"slip_up_{case_id}").name if st.session_state.get(f"slip_up_{case_id}") else case_files.get("slip_surface"),
                    st.session_state.get("slip_kind"), st.session_state.get("slip_fb"), st.session_state.get("d_fb"))
         stored = st.session_state.get("residual_result")
         ready = stored is not None and stored.get("sig") == res_sig
         if not ready:
-            st.info("為避免大檔當機，滑動面與殘餘土體現在採用『按鈕才計算』。先確認設定，再按下計算。")
+            st.caption("設定完成後，按「計算殘餘土體」才會執行計算。")
         if st.button("▶ 計算殘餘土體", type="primary", disabled=bool(err), key="calc_residual"):
             try:
                 region = potential_region
-                z2c = (z2 - corr).astype("float32")
                 if method == methods[0]:
-                    vals = dz[region & np.isfinite(dz)].astype("float64")
-                    t = np.maximum(vals + float(depth), 0.0)
-                    pos = t[t > 0]
-                    result = {"sig":res_sig, "method":"uniform", "depth":float(depth),
-                              "slip_label":slip_label, "volume":float(t.sum()*CA),
-                              "area":float(len(pos)*CA), "region_area":float(len(vals)*CA),
-                              "mean":float(pos.mean()) if len(pos) else 0.0, "max":float(pos.max()) if len(pos) else 0.0}
+                    # 分塊計算：不建立整張 vals/t 暫存陣列，避免大 DEM 在按鈕計算時瞬間吃滿 RAM。
+                    d0 = float(depth)
+                    total_v = total_pos = total_sum = 0.0
+                    total_n = 0
+                    max_t = 0.0
+                    for r0 in range(0, dz.shape[0], 512):
+                        r1 = min(dz.shape[0], r0 + 512)
+                        dd = dz[r0:r1]
+                        rr = region[r0:r1] & np.isfinite(dd)
+                        if not rr.any():
+                            continue
+                        vv = dd[rr].astype(np.float32, copy=False)
+                        tt = np.maximum(vv + d0, 0.0)
+                        total_v += float(tt.sum(dtype=np.float64))
+                        total_pos += float(np.count_nonzero(tt > 0))
+                        total_sum += float(tt[tt > 0].sum(dtype=np.float64)) if np.any(tt > 0) else 0.0
+                        total_n += vv.size
+                        if tt.size:
+                            max_t = max(max_t, float(tt.max()))
+                    result = {"sig":res_sig, "method":"uniform", "depth":d0,
+                              "slip_label":slip_label, "volume":total_v*CA,
+                              "area":total_pos*CA, "region_area":total_n*CA,
+                              "mean":(total_sum/total_pos) if total_pos else 0.0, "max":max_t}
                 elif method == methods[1]:
+                    z2c = (z2 - corr).astype("float32")
                     n_region = int(region.sum())
                     if n_region > 4_000_000:
                         raise ValueError("目前分析網格仍過大（潛在滑動體超過 400 萬格）。請先把左側「降採樣倍率」提高到 6～8 倍，再執行 DoD 幾何推估；這可避免 Streamlit 記憶體不足而整頁當機。")
@@ -481,6 +758,7 @@ if section == "🧱 殘餘土體":
                     rs = core.residual_summary(thick_arr, CA, region)
                     result = {"sig":res_sig, "method":"raster", "slip":slip_arr, "thick":thick_arr, "slip_label":"DoD 幾何推估滑動面（研究性）", **{"volume":rs["殘餘土體體積_m3"],"area":rs["有殘餘土體面積_m2"],"region_area":rs["範圍面積_m2"],"mean":rs["平均厚度_m"],"max":rs["最大厚度_m"]}}
                 else:
+                    z2c = (z2 - corr).astype("float32")
                     sp = save_upload(st.session_state.get("slip_up")) or demo_slip
                     if not sp: raise ValueError("請上傳滑動面 GeoTIFF。")
                     if int(region.sum()) > 4_000_000:
@@ -496,6 +774,7 @@ if section == "🧱 殘餘土體":
                     label = f"上傳滑動面（缺值 {n_missing * CA:,.0f} m² 以 d={st.session_state.get('d_fb',2.0):g} m 補足）" if st.session_state.get("slip_fb", True) and n_missing else "上傳滑動面"
                     result = {"sig":res_sig, "method":"raster", "slip":slip_arr, "thick":thick_arr, "slip_label":label, **{"volume":rs["殘餘土體體積_m3"],"area":rs["有殘餘土體面積_m2"],"region_area":rs["範圍面積_m2"],"mean":rs["平均厚度_m"],"max":rs["最大厚度_m"]}}
                 st.session_state["residual_result"] = result
+                persist_case({"residual_summary": {k: v for k, v in result.items() if k not in ("slip", "thick")}})
                 st.rerun()
             except Exception as e:
                 st.error(f"殘餘土體計算失敗：{e}")
@@ -519,18 +798,28 @@ if section == "🧱 殘餘土體":
             dmax = sc[1].number_input("最大情境深度 (m)", 0.2, 200.0, sens_max_default, 0.5, key="s_max")
             dstep = sc[2].number_input("情境間隔 (m)", 0.1, 20.0, 0.5, 0.1, key="s_step")
             if st.button("▶ 執行敏感度分析", key="run_sensitivity"):
-                vals = dz[potential_region & np.isfinite(dz)].astype("float64")
                 depths = np.arange(dmin, dmax + 1e-9, dstep)[:60]
-                # 使用排序後的累積和，避免每個深度都對整個 raster 重新掃描。
-                vals.sort()
-                csum = np.concatenate(([0.0], np.cumsum(vals, dtype="float64")))
-                rows=[]
-                for dd in depths:
-                    k = int(np.searchsorted(vals, -dd, side="left"))
-                    # vals[:k] <= -d => max(d+v,0)=0; vals[k:] contribute.
-                    vol = (dd*(len(vals)-k) + (csum[-1]-csum[k])) * CA
-                    rows.append({"假設滑動面深度_m":float(dd),"殘餘體積_m3":float(vol),"殘餘面積_m2":float((len(vals)-k)*CA)})
+                # 分塊累計：避免 vals.sort()/cumsum() 建立數百 MB 的暫存陣列。
+                vol_sum = np.zeros(len(depths), dtype=np.float64)
+                pos_n = np.zeros(len(depths), dtype=np.int64)
+                for r0 in range(0, dz.shape[0], 512):
+                    r1 = min(dz.shape[0], r0 + 512)
+                    dd0 = dz[r0:r1]
+                    rr = potential_region[r0:r1] & np.isfinite(dd0)
+                    if not rr.any():
+                        continue
+                    vv = dd0[rr].astype(np.float32, copy=False)
+                    for j, dd in enumerate(depths):
+                        tt = vv + float(dd)
+                        pos = tt > 0
+                        if np.any(pos):
+                            vol_sum[j] += float(tt[pos].sum(dtype=np.float64))
+                            pos_n[j] += int(np.count_nonzero(pos))
+                rows=[{"假設滑動面深度_m":float(dd),
+                       "殘餘體積_m3":float(vol_sum[j]*CA),
+                       "殘餘面積_m2":float(pos_n[j]*CA)} for j, dd in enumerate(depths)]
                 st.session_state["sensitivity_result"] = {"sig":res_sig,"df":pd.DataFrame(rows)}
+                persist_case({"sensitivity_rows": rows})
             sr = st.session_state.get("sensitivity_result")
             if sr and sr.get("sig") == res_sig:
                 sens_df = sr["df"]
@@ -614,11 +903,11 @@ if section == "📈 剖面":
             profile_rows = pd.DataFrame({"距離_m": dist, "E": xs, "N": ys, "T1_高程": g1, "T2_高程(校正後)": g2,
                                          "dz": g2 - g1, "滑動面": gs if gs is not None else np.nan})
             dl = st.columns(2)
-            dl[0].download_button("下載剖面 CSV", profile_rows.to_csv(index=False).encode("utf-8-sig"),
-                                  file_name="profile.csv", mime="text/csv")
+            dl[0].download_button("下載剖面資料（CSV）", profile_rows.to_csv(index=False).encode("utf-8-sig"),
+                                  file_name="剖面資料.csv", mime="text/csv")
             try:
-                dl[1].download_button("下載剖面 DXF（距離-高程）", core.profile_to_dxf(dist, profile_series),
-                                      file_name="profile.dxf", mime="application/dxf")
+                dl[1].download_button("下載剖面圖資（DXF）", core.profile_to_dxf(dist, profile_series),
+                                      file_name="剖面圖資.dxf", mime="application/dxf")
             except Exception as e:  # noqa: BLE001
                 dl[1].caption(f"DXF 匯出不可用：{e}")
         except Exception as e:  # noqa: BLE001
@@ -628,26 +917,30 @@ if section == "📈 剖面":
 if section == "💾 匯出":
     st.write("按下按鈕才會產生檔案（大範圍時需要數秒）。")
     if st.button("產生匯出檔案", key="mk_exp"):
+        persist_case()
         out = {}
-        out["dz.tif"] = core.array_to_geotiff_bytes(dz, grid)
+        out["DoD差異高程.tif"] = core.array_to_geotiff_bytes(dz, grid)
         stored_res = st.session_state.get("residual_result")
         if stored_res and stored_res.get("thick") is not None:
-            out["residual_thickness.tif"] = core.array_to_geotiff_bytes(stored_res["thick"], grid)
+            out["殘餘土體厚度.tif"] = core.array_to_geotiff_bytes(stored_res["thick"], grid)
         bio = io.BytesIO()
         with pd.ExcelWriter(bio, engine="openpyxl") as xw:
-            pd.DataFrame({"項目": ["降採樣倍率", "格距(m)", "LoD(m)", "校正模式", "膨脹係數", "滑動面來源"],
-                          "值": [factor, grid.cell_x, lod, corr_mode, st.session_state.get("bulk", ""), slip_label]}
+            pd.DataFrame({"項目": ["降採樣倍率", "格距(m)", "LoD(m)", "校正模式", "膨脹係數", "滑動面來源",
+                                      "實際崩塌分析範圍", "潛在滑動體分析範圍"],
+                          "值": [factor, grid.cell_x, lod, corr_mode, st.session_state.get("bulk", ""), slip_label,
+                                 st.session_state.get("collapse_region_choice", "全部"),
+                                 st.session_state.get("potential_region_choice", "全部")]}
                          ).to_excel(xw, sheet_name="參數", index=False)
-            pd.DataFrame({"實際崩塌（DoD）": S_src, "堆積區": S_dep, "全區": S_all}).to_excel(xw, sheet_name="量體統計")
+            pd.DataFrame({"實際崩塌（DoD）": S_src, "堆積區": S_dep, "全區": S_all}).to_excel(xw, sheet_name="崩塌與堆積統計")
             if stored_res:
-                pd.DataFrame({"殘餘土體": {"殘餘土體體積_m3": stored_res.get("volume",0), "有殘餘土體面積_m2": stored_res.get("area",0), "平均厚度_m": stored_res.get("mean",0), "最大厚度_m": stored_res.get("max",0)}}).to_excel(xw, sheet_name="殘餘土體")
+                pd.DataFrame({"殘餘土體": {"殘餘土體體積_m3": stored_res.get("volume",0), "有殘餘土體面積_m2": stored_res.get("area",0), "平均厚度_m": stored_res.get("mean",0), "最大厚度_m": stored_res.get("max",0)}}).to_excel(xw, sheet_name="殘餘土體分析")
             if sens_df is not None:
-                sens_df.to_excel(xw, sheet_name="敏感度", index=False)
+                sens_df.to_excel(xw, sheet_name="深度敏感度", index=False)
             if cstats:
-                pd.DataFrame({"校正": cstats}).to_excel(xw, sheet_name="對位校正")
+                pd.DataFrame({"校正": cstats}).to_excel(xw, sheet_name="對位校正結果")
             if profile_rows is not None:
                 profile_rows.to_excel(xw, sheet_name="剖面", index=False)
-        out["summary.xlsx"] = bio.getvalue()
+        out["分析結果.xlsx"] = bio.getvalue()
         st.session_state["exports"] = out
     for fn, data in st.session_state.get("exports", {}).items():
         st.download_button(f"下載 {fn}", data, file_name=fn, key=f"dl_{fn}")
@@ -722,11 +1015,18 @@ if section == "🗺️ 範圍與剖面線":
         feats = st.session_state[f"geo_{z}"]
         if feats:
             stl = ZONE_DRAW_STYLES[z]
+            numbered = []
+            for idx, feat in enumerate(feats, 1):
+                feat2 = dict(feat)
+                props = dict(feat2.get("properties") or {})
+                props["名稱"] = f"{label} {idx}"
+                feat2["properties"] = props
+                numbered.append(feat2)
             folium.GeoJson(
-                {"type": "FeatureCollection", "features": feats},
+                {"type": "FeatureCollection", "features": numbered},
                 name=f"已存：{label}",
                 style_function=lambda _f, s=stl: dict(s),
-                tooltip=label,
+                tooltip=folium.GeoJsonTooltip(fields=["名稱"], aliases=[""]),
             ).add_to(m)
     draw_style = ZONE_DRAW_STYLES[zone].copy()
     shape_opts = {"shapeOptions": draw_style}
@@ -749,17 +1049,20 @@ if section == "🗺️ 範圍與剖面線":
     if bc[0].button(f"💾 儲存剛畫的 {len(cur)} 個圖形", disabled=not cur, width="stretch"):
         st.session_state[f"geo_{zone}"] += cur
         st.session_state[f"ver_{zone}"] += 1
+        persist_case()
         st.rerun()
     if bc[1].button("↩️ 刪除此類型最後一個", disabled=not st.session_state[f"geo_{zone}"], width="stretch"):
         st.session_state[f"geo_{zone}"].pop()
         st.session_state[f"ver_{zone}"] += 1
+        persist_case()
         st.rerun()
     if bc[2].button("🗑️ 清除此類型全部", disabled=not st.session_state[f"geo_{zone}"], width="stretch"):
         st.session_state[f"geo_{zone}"] = []
         st.session_state[f"ver_{zone}"] += 1
+        persist_case()
         st.rerun()
 
-    cnt = {ZONES[z][0]: len(st.session_state[f"geo_{z}"]) + (1 if st.session_state.get(f"up_{z}") else 0)
+    cnt = {ZONES[z][0]: len(st.session_state[f"geo_{z}"]) + (1 if st.session_state.get(f"up_{z}_{case_id}") else 0)
            for z in ZONES}
     st.write("已儲存數量：" + "　".join(f"**{k}** {v}" for k, v in cnt.items()))
-    st.caption("說明：🔴 實際崩塌範圍只控制已發生崩塌統計；🟠 潛在滑動體範圍只控制殘餘土體；🔵 堆積區控制堆積統計。DoD 本身永遠先計算整個分析區。")
+    st.caption("說明：🔴 實際崩塌與 🟠 潛在滑動體都可畫多塊；分析時可在左側分別選擇「全部」或指定第幾塊。🔵 堆積區仍控制堆積統計。DoD 本身永遠先計算整個分析區。")
