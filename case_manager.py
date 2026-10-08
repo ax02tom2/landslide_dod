@@ -79,9 +79,14 @@ def using_supabase() -> bool:
     return _supabase_db_configured() and psycopg is not None
 
 
+def _storage_key() -> str:
+    """取得 Supabase Storage 的伺服器端金鑰。優先使用新版 Secret key。"""
+    return _secret("SUPABASE_SECRET_KEY") or _secret("SUPABASE_SERVICE_ROLE_KEY")
+
+
 def using_storage() -> bool:
     """回傳是否已設定 Supabase Storage 的伺服器端存取。"""
-    return bool(_secret("SUPABASE_URL") and _secret("SUPABASE_SERVICE_ROLE_KEY"))
+    return bool(_secret("SUPABASE_URL") and _storage_key())
 
 
 def _storage_url(path: str = "") -> str:
@@ -91,13 +96,13 @@ def _storage_url(path: str = "") -> str:
 
 
 def _storage_request(method: str, path: str, *, data=None, content_type=None):
-    key = _secret("SUPABASE_SERVICE_ROLE_KEY")
+    key = _storage_key()
     if not using_storage():
-        raise RuntimeError("尚未設定 Supabase Storage 所需的 SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY。")
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "apikey": key,
-    }
+        raise RuntimeError("尚未設定 Supabase Storage 所需的 SUPABASE_URL / SUPABASE_SECRET_KEY。")
+    # 新版 sb_secret_* 不是 JWT，應放在 apikey；舊版 service_role 才使用 Bearer。
+    headers = {"apikey": key}
+    if not key.startswith("sb_secret_"):
+        headers["Authorization"] = f"Bearer {key}"
     if content_type:
         headers["Content-Type"] = content_type
     req = urllib.request.Request(_storage_url(path), data=data, headers=headers, method=method)
@@ -110,9 +115,8 @@ def _storage_request(method: str, path: str, *, data=None, content_type=None):
 
 
 def _storage_upload_bytes(path: str, data: bytes, content_type: str = "application/octet-stream"):
-    headers_key = _secret("SUPABASE_SERVICE_ROLE_KEY")
+    headers_key = _storage_key()
     headers = {
-        "Authorization": f"Bearer {headers_key}",
         "apikey": headers_key,
         "Content-Type": content_type,
         "x-upsert": "true",
@@ -134,12 +138,14 @@ def _storage_remove(paths):
     paths = [p for p in paths if p]
     if not paths:
         return
-    key = _secret("SUPABASE_SERVICE_ROLE_KEY")
+    key = _storage_key()
     url = f"{_secret('SUPABASE_URL').rstrip('/')}/storage/v1/object/remove"
     payload = json.dumps({"prefixes": paths}).encode("utf-8")
+    headers = {"apikey": key, "Content-Type": "application/json"}
+    if not key.startswith("sb_secret_"):
+        headers["Authorization"] = f"Bearer {key}"
     req = urllib.request.Request(
-        url, data=payload,
-        headers={"Authorization": f"Bearer {key}", "apikey": key, "Content-Type": "application/json"},
+        url, data=payload, headers=headers,
         method="POST",
     )
     try:
