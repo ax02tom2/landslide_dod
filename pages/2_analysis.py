@@ -28,6 +28,7 @@ from streamlit_folium import st_folium
 
 import core
 import demo_data
+import case_manager as cm
 
 st.set_page_config(page_title="崩塌地形變異分析", page_icon="⛰️", layout="wide")
 
@@ -59,6 +60,65 @@ for z in ZONES:
     st.session_state.setdefault(f"geo_{z}", [])  # 已儲存的 GeoJSON features (WGS84)
     st.session_state.setdefault(f"ver_{z}", 0)  # 地圖版本（儲存後重置繪圖層）
 
+# --------------------------------------------------------------------------
+# 使用者 / 案件管理
+# --------------------------------------------------------------------------
+if not st.session_state.get("user"):
+    st.warning("請先登入。")
+    if st.button("回到案件管理"):
+        st.switch_page("app.py")
+    st.stop()
+user = st.session_state["user"]
+case_id = st.session_state.get("case_id")
+if not case_id:
+    st.warning("請先建立或開啟案件。")
+    if st.button("回到案件管理"):
+        st.switch_page("app.py")
+    st.stop()
+case = cm.get_case(user["id"], case_id)
+if not case:
+    st.error("案件不存在或你沒有存取權限。")
+    st.stop()
+case_files = dict(case.get("files") or {})
+case_state = dict(case.get("state") or {})
+
+if st.session_state.get("_loaded_case_id") != case_id:
+    for _k in [f"geo_{z}" for z in ZONES] + [f"ver_{z}" for z in ZONES] + ["residual_result", "sensitivity_result", "exports", "_dkey", "_data", "_depth_hint"]:
+        st.session_state.pop(_k, None)
+    for _z in ZONES:
+        st.session_state[f"geo_{_z}"] = list((case_state.get("zones") or {}).get(_z, []))
+        st.session_state[f"ver_{_z}"] = 0
+    for _k, _v in (case_state.get("settings") or {}).items():
+        if _v is not None:
+            st.session_state[_k] = _v
+    st.session_state["_loaded_case_id"] = case_id
+
+
+def persist_case(extra_state=None):
+    settings_keys = ["factor", "nd_txt", "corr_label", "lod", "map_px", "vmax", "bulk", "analysis_section", "draw_zone", "slip_method", "depth_basis", "d_uni", "slip_kind", "slip_fb", "d_fb", "s_min", "s_max", "s_step", "pstep", "ve", "use_manual", "e1", "n1", "e2", "n2"]
+    settings = {k: st.session_state.get(k) for k in settings_keys if k in st.session_state}
+    zones = {z: st.session_state.get(f"geo_{z}", []) for z in ZONES}
+    state = dict(case_state)
+    state["zones"] = zones
+    state["settings"] = settings
+    if extra_state:
+        state.update(extra_state)
+    return cm.update_case(user["id"], case_id, state=state, files=case_files)
+
+
+st.sidebar.markdown(f"### 📁 {case['name']}")
+st.sidebar.caption(f"使用者：{user['username']}")
+if st.sidebar.button("💾 儲存目前案件", width="stretch"):
+    persist_case()
+    st.sidebar.success("案件已儲存")
+if st.sidebar.button("① 前處理｜裁切與縮小", width="stretch"):
+    persist_case()
+    st.switch_page("pages/1_preprocess.py")
+if st.sidebar.button("回案件管理", width="stretch"):
+    persist_case()
+    st.switch_page("app.py")
+
+
 
 # --------------------------------------------------------------------------
 # 小工具
@@ -75,9 +135,14 @@ def memo(key, fn):
     return val
 
 
-def save_upload(uf):
+def save_upload(uf, role=None):
     if uf is None:
         return None
+    if role:
+        path = cm.save_uploaded_file(user["id"], case_id, uf, role)
+        case_files[role] = path
+        cm.update_case(user["id"], case_id, files=case_files)
+        return path
     buf = uf.getbuffer()
     h = hashlib.md5(f"{uf.name}{uf.size}".encode() + bytes(buf[:1 << 20]) + bytes(buf[-(1 << 20):])).hexdigest()[:12]
     path = os.path.join(TMP, f"{h}_{os.path.basename(uf.name)}")
@@ -191,9 +256,9 @@ if st.session_state.get("demo") and sb.button("結束範例模式", width="stret
     st.rerun()
 
 sb.caption(f"目前單檔上傳上限：{int(st.get_option('server.maxUploadSize'))} MB")
-f1 = sb.file_uploader("T1（崩塌前）DEM/DSM GeoTIFF", type=["tif", "tiff"], key="f1")
-f2 = sb.file_uploader("T2（崩塌後）DEM/DSM GeoTIFF", type=["tif", "tiff"], key="f2")
-fo = sb.file_uploader("正射影像 GeoTIFF（選用，僅作底圖）", type=["tif", "tiff"], key="fo")
+f1 = sb.file_uploader("T1（崩塌前）DEM/DSM GeoTIFF", type=["tif", "tiff"], key=f"f1_{case_id}")
+f2 = sb.file_uploader("T2（崩塌後）DEM/DSM GeoTIFF", type=["tif", "tiff"], key=f"f2_{case_id}")
+fo = sb.file_uploader("正射影像 GeoTIFF（選用，僅作底圖）", type=["tif", "tiff"], key=f"fo_{case_id}")
 
 if st.session_state.get("demo"):
     if "_demo_paths" not in st.session_state:
@@ -214,18 +279,21 @@ else:
     lp1 = _local("T1 本機路徑", "lp1")
     lp2 = _local("T2 本機路徑", "lp2")
     lpo = _local("正射影像 本機路徑", "lpo")
-    p1 = lp1 or save_upload(f1)
-    p2 = lp2 or save_upload(f2)
-    po = lpo or save_upload(fo)
+    p1 = lp1 or save_upload(f1, "t1") or case_files.get("t1")
+    p2 = lp2 or save_upload(f2, "t2") or case_files.get("t2")
+    po = lpo or save_upload(fo, "ortho") or case_files.get("ortho")
     demo_slip = None
     pre = st.session_state.get("pre")
     if pre and not (p1 or p2):
         p1, p2, po = pre.get("t1"), pre.get("t2"), pre.get("ortho")
+        p1 = p1 or case_files.get("t1")
+        p2 = p2 or case_files.get("t2")
+        po = po or case_files.get("ortho")
         sb.success("使用「前處理」的裁切成果（左側 **① 前處理｜裁切與縮小** 可重新裁切）")
 
 sb.header("2. 計算設定")
-factor = sb.slider("降採樣倍率", 1, 20, 4, help="倍率越高越省記憶體、較不容易因大檔當機，但空間解析度會降低。建議大範圍資料先用 4 倍。")
-nd_txt = sb.text_input("額外 NoData 值（選用）", "", help="若 DEM 未宣告 NoData 但用 -9999 之類填空，請在此輸入。")
+factor = sb.slider("降採樣倍率", 1, 20, int(st.session_state.get("factor", 4)), key="factor", help="倍率越高越省記憶體、較不容易因大檔當機，但空間解析度會降低。建議大範圍資料先用 4 倍。")
+nd_txt = sb.text_input("額外 NoData 值（選用）", str(st.session_state.get("nd_txt", "")), key="nd_txt", help="若 DEM 未宣告 NoData 但用 -9999 之類填空，請在此輸入。")
 try:
     nd_override = float(nd_txt) if nd_txt.strip() else None
 except ValueError:
@@ -235,7 +303,8 @@ except ValueError:
 corr_label = sb.radio(
     "兩期對位校正（需先畫穩定區）",
     ["不校正", "平移（中位數）", "平面（平移＋傾斜）"],
-    index=0,
+    index=["不校正", "平移（中位數）", "平面（平移＋傾斜）"].index(st.session_state.get("corr_label", "不校正")),
+    key="corr_label",
     help="穩定區 = 兩期之間地形沒有變動的地方（岩盤、道路、建物屋頂等）。",
 )
 corr_mode = {"不校正": "none", "平移（中位數）": "offset", "平面（平移＋傾斜）": "plane"}[corr_label]
@@ -287,7 +356,7 @@ with sb.expander("資料資訊"):
 with sb.expander("3. 範圍檔上傳（選用；也可在地圖上畫）"):
     st.caption("支援 GeoJSON、或 shapefile 壓縮成 .zip。需含座標系統。")
     for z in POLY_ZONES:
-        st.file_uploader(ZONES[z][0], type=["geojson", "json", "zip"], key=f"up_{z}")
+        st.file_uploader(ZONES[z][0], type=["geojson", "json", "zip"], key=f"up_{z}_{case_id}")
 
 
 def read_vector_geoms(uf):
@@ -302,7 +371,7 @@ def read_vector_geoms(uf):
 
 def zone_sig(z):
     feats = json.dumps(st.session_state[f"geo_{z}"], sort_keys=True)
-    uf = st.session_state.get(f"up_{z}")
+    uf = st.session_state.get(f"up_{z}_{case_id}")
     return hashlib.md5((feats + (f"{uf.name}{uf.size}" if uf else "")).encode()).hexdigest()
 
 
@@ -311,7 +380,7 @@ def zone_geoms(z):
     for f in st.session_state[f"geo_{z}"]:
         if f["geometry"]["type"] in ("Polygon", "MultiPolygon"):
             geoms.append(transform_geom("EPSG:4326", grid.crs, f["geometry"]))
-    uf = st.session_state.get(f"up_{z}")
+    uf = st.session_state.get(f"up_{z}_{case_id}")
     if uf is not None:
         try:
             geoms += read_vector_geoms(uf)
@@ -363,7 +432,7 @@ if sigma is not None:
     sb.button("套用建議 LoD", on_click=lambda: st.session_state.update(lod=round(sugg, 2)))
 else:
     sb.caption("畫出「穩定區」後，這裡會給 LoD 建議值。")
-sb.select_slider("地圖預覽解析度（px，越小越不易卡）", options=[500, 700, 900, 1200, 1600], value=900, key="map_px")
+sb.select_slider("地圖預覽解析度（px，越小越不易卡）", options=[500, 700, 900, 1200, 1600], value=int(st.session_state.get("map_px", 900)), key="map_px")
 sb.number_input("色階範圍 ±(m)", 0.5, 100.0, 5.0, 0.5, key="vmax")
 vmax = float(st.session_state["vmax"])
 
@@ -497,6 +566,9 @@ if section == "🧱 殘餘土體":
     ca[3].metric("最大堆積厚", f"{S_dep['最大堆積厚_m']:.2f} m")
 
     st.markdown("### B. 潛在滑動體內殘餘不穩定土體")
+    if case_state.get("residual_summary") and st.session_state.get("residual_result") is None:
+        rs0 = case_state["residual_summary"]
+        st.info(f"本案件已保存上次計算摘要：殘餘土體 {fmt_m3(float(rs0.get('volume', 0)))}、有殘餘土體面積 {fmt_m2(float(rs0.get('area', 0)))}。若修改了範圍或設定，請重新計算。")
     if m_potential is None:
         st.warning("請先到「範圍與剖面線」圈繪完整的「潛在滑動體範圍」。本頁不會在未定義範圍時自動對整張 DEM 計算。")
     else:
@@ -546,8 +618,8 @@ if section == "🧱 殘餘土體":
             st.caption("選擇此方法後，按下「計算殘餘土體」才會執行 DoD 幾何推估。")
 
         else:  # 上傳滑動面
-            up = st.file_uploader("滑動面 GeoTIFF", type=["tif", "tiff"], key="slip_up")
-            sp = save_upload(up) or demo_slip
+            up = st.file_uploader("滑動面 GeoTIFF", type=["tif", "tiff"], key=f"slip_up_{case_id}")
+            sp = save_upload(up, "slip_surface") or case_files.get("slip_surface") or demo_slip
             kind = st.radio("檔案內容", ["高程（m，同 DEM 基準面）", "深度（m，自 T1 地表往下）"], horizontal=True, key="slip_kind")
             fb = st.checkbox("滑動面缺值處，以等深度假設補足", value=True, key="slip_fb")
             d_fb = st.number_input("補足用深度 (m)", 0.1, 200.0, 2.0, 0.5, key="d_fb", disabled=not fb)
@@ -555,7 +627,7 @@ if section == "🧱 殘餘土體":
                 err = "請上傳滑動面 GeoTIFF。"
 
         res_sig = (dkey, zone_sig("potential"), zone_sig("collapse"), zone_sig("exclude"), corr_mode, round(lod,4), method,
-                   depth, depth_basis, st.session_state.get("slip_up").name if st.session_state.get("slip_up") else None,
+                   depth, depth_basis, st.session_state.get(f"slip_up_{case_id}").name if st.session_state.get(f"slip_up_{case_id}") else case_files.get("slip_surface"),
                    st.session_state.get("slip_kind"), st.session_state.get("slip_fb"), st.session_state.get("d_fb"))
         stored = st.session_state.get("residual_result")
         ready = stored is not None and stored.get("sig") == res_sig
@@ -614,6 +686,7 @@ if section == "🧱 殘餘土體":
                     label = f"上傳滑動面（缺值 {n_missing * CA:,.0f} m² 以 d={st.session_state.get('d_fb',2.0):g} m 補足）" if st.session_state.get("slip_fb", True) and n_missing else "上傳滑動面"
                     result = {"sig":res_sig, "method":"raster", "slip":slip_arr, "thick":thick_arr, "slip_label":label, **{"volume":rs["殘餘土體體積_m3"],"area":rs["有殘餘土體面積_m2"],"region_area":rs["範圍面積_m2"],"mean":rs["平均厚度_m"],"max":rs["最大厚度_m"]}}
                 st.session_state["residual_result"] = result
+                persist_case({"residual_summary": {k: v for k, v in result.items() if k not in ("slip", "thick")}})
                 st.rerun()
             except Exception as e:
                 st.error(f"殘餘土體計算失敗：{e}")
@@ -658,6 +731,7 @@ if section == "🧱 殘餘土體":
                        "殘餘體積_m3":float(vol_sum[j]*CA),
                        "殘餘面積_m2":float(pos_n[j]*CA)} for j, dd in enumerate(depths)]
                 st.session_state["sensitivity_result"] = {"sig":res_sig,"df":pd.DataFrame(rows)}
+                persist_case({"sensitivity_rows": rows})
             sr = st.session_state.get("sensitivity_result")
             if sr and sr.get("sig") == res_sig:
                 sens_df = sr["df"]
@@ -755,6 +829,7 @@ if section == "📈 剖面":
 if section == "💾 匯出":
     st.write("按下按鈕才會產生檔案（大範圍時需要數秒）。")
     if st.button("產生匯出檔案", key="mk_exp"):
+        persist_case()
         out = {}
         out["DoD差異高程.tif"] = core.array_to_geotiff_bytes(dz, grid)
         stored_res = st.session_state.get("residual_result")
@@ -876,17 +951,20 @@ if section == "🗺️ 範圍與剖面線":
     if bc[0].button(f"💾 儲存剛畫的 {len(cur)} 個圖形", disabled=not cur, width="stretch"):
         st.session_state[f"geo_{zone}"] += cur
         st.session_state[f"ver_{zone}"] += 1
+        persist_case()
         st.rerun()
     if bc[1].button("↩️ 刪除此類型最後一個", disabled=not st.session_state[f"geo_{zone}"], width="stretch"):
         st.session_state[f"geo_{zone}"].pop()
         st.session_state[f"ver_{zone}"] += 1
+        persist_case()
         st.rerun()
     if bc[2].button("🗑️ 清除此類型全部", disabled=not st.session_state[f"geo_{zone}"], width="stretch"):
         st.session_state[f"geo_{zone}"] = []
         st.session_state[f"ver_{zone}"] += 1
+        persist_case()
         st.rerun()
 
-    cnt = {ZONES[z][0]: len(st.session_state[f"geo_{z}"]) + (1 if st.session_state.get(f"up_{z}") else 0)
+    cnt = {ZONES[z][0]: len(st.session_state[f"geo_{z}"]) + (1 if st.session_state.get(f"up_{z}_{case_id}") else 0)
            for z in ZONES}
     st.write("已儲存數量：" + "　".join(f"**{k}** {v}" for k, v in cnt.items()))
     st.caption("說明：🔴 實際崩塌範圍只控制已發生崩塌統計；🟠 潛在滑動體範圍只控制殘餘土體；🔵 堆積區控制堆積統計。DoD 本身永遠先計算整個分析區。")

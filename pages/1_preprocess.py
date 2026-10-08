@@ -16,6 +16,7 @@ from shapely.geometry import shape
 from streamlit_folium import st_folium
 
 import core
+import case_manager as cm
 
 st.set_page_config(page_title="前處理：裁切與縮小", page_icon="✂️", layout="wide")
 TMP = os.path.join(tempfile.gettempdir(), "dod_app")
@@ -25,8 +26,43 @@ os.makedirs(OUT, exist_ok=True)
 st.title("✂️ 前處理：裁切與縮小")
 st.caption("大檔先裁到崩塌範圍、必要時降低解析度，再回主頁分析。分塊讀寫，不會把整個檔案讀進記憶體。")
 
+# --------------------------------------------------------------------------
+# 使用者 / 案件
+# --------------------------------------------------------------------------
+if not st.session_state.get("user"):
+    st.warning("請先登入。")
+    if st.button("回到案件管理"):
+        st.switch_page("app.py")
+    st.stop()
+user = st.session_state["user"]
+case_id = st.session_state.get("case_id")
+if not case_id:
+    st.warning("請先建立或開啟案件。")
+    if st.button("回到案件管理"):
+        st.switch_page("app.py")
+    st.stop()
+case = cm.get_case(user["id"], case_id)
+if not case:
+    st.error("案件不存在或你沒有存取權限。")
+    st.stop()
+st.sidebar.markdown(f"### 📁 {case['name']}")
+if st.sidebar.button("回案件管理", width="stretch"):
+    st.switch_page("app.py")
+if st.sidebar.button("前往 ② 地形變異分析｜DoD", width="stretch"):
+    st.switch_page("pages/2_analysis.py")
 
-def save_upload(uf):
+case_files = dict(case.get("files") or {})
+case_state = dict(case.get("state") or {})
+
+
+def save_upload(uf, role=None):
+    if uf is None:
+        return None
+    if role:
+        path = cm.save_uploaded_file(user["id"], case_id, uf, role)
+        case_files[role] = path
+        cm.update_case(user["id"], case_id, files=case_files)
+        return path
     buf = uf.getbuffer()
     h = hashlib.md5(f"{uf.name}{uf.size}".encode() + bytes(buf[:1 << 20]) + bytes(buf[-(1 << 20):])).hexdigest()[:12]
     path = os.path.join(TMP, f"{h}_{os.path.basename(uf.name)}")
@@ -56,9 +92,26 @@ for col, (key, label, req) in zip(cols, [("t1", "T1（崩塌前）DEM/DSM", True
             else:
                 st.warning("找不到此路徑（雲端版讀不到你的硬碟）")
         elif uf is not None:
-            srcs[key] = save_upload(uf)
+            srcs[key] = save_upload(uf, key)
 
 NAMES = {"t1": "T1", "t2": "T2", "ortho": "正射"}
+# 將本機路徑也記入案件；本機部署可在重新整理後直接重開。
+if srcs:
+    case_files.update({k: v for k, v in srcs.items() if v})
+    cm.update_case(user["id"], case_id, state=case_state, files=case_files)
+# 案件已保存的原始/前處理成果優先作為重新開啟案件後的輸入。
+for _k in ("t1", "t2", "ortho"):
+    _p = case_files.get(_k)
+    if _p and os.path.isfile(_p) and _k not in srcs:
+        srcs[_k] = _p
+
+# 從案件恢復前次設定。
+if "crop_lock" not in st.session_state and case_state.get("crop_lock"):
+    st.session_state["crop_lock"] = case_state["crop_lock"]
+if "pre_factor" not in st.session_state and case_state.get("pre_factor") is not None:
+    st.session_state["pre_factor"] = case_state["pre_factor"]
+if "pre_ofactor" not in st.session_state and case_state.get("pre_ofactor") is not None:
+    st.session_state["pre_ofactor"] = case_state["pre_ofactor"]
 lock = st.session_state.get("crop_lock")  # {"bounds": (...), "crs_wkt": str}
 
 if not srcs and not lock:
@@ -133,12 +186,14 @@ else:
             st.caption("請用地圖左上角的矩形工具框出崩塌範圍（外加一些緩衝與穩定區）。沒畫則使用全範圍。")
     if st.button("🔒 鎖定此範圍（之後的檔案都用它）", type="primary"):
         st.session_state["crop_lock"] = {"bounds": list(bounds), "crs_wkt": crs.to_wkt()}
+        cm.update_case(user["id"], case_id, state={**case_state, "crop_lock": st.session_state["crop_lock"], "pre_factor": st.session_state.get("pre_factor", 1), "pre_ofactor": st.session_state.get("pre_ofactor", 4)}, files=case_files)
         st.rerun()
 
 # ---- 縮小與預估 ----
 fc = st.columns(2)
 factor = fc[0].number_input("DEM 縮小倍率（1 = 保持原解析度）", 1, 50, 1, 1, key="pre_factor")
 ofactor = fc[1].number_input("正射影像縮小倍率", 1, 100, 4, 1, key="pre_ofactor", help="正射只當底圖，可縮小很多。")
+case_state.update({"pre_factor": int(factor), "pre_ofactor": int(ofactor)})
 
 for k, p in srcs.items():
     try:
@@ -182,6 +237,8 @@ def do_crop(keys):
             st.warning(f"另存失敗：{e}")
     st.session_state.setdefault("pre", {}).update({k: v["path"] for k, v in res.items()})
     st.session_state.setdefault("pre_info", {}).update(res)
+    case_files.update({k: v["path"] for k, v in res.items()})
+    cm.update_case(user["id"], case_id, state={**case_state, "crop_lock": st.session_state.get("crop_lock"), "pre_factor": int(factor), "pre_ofactor": int(ofactor), "pre_info": {k: {kk: vv for kk, vv in v.items() if kk != "path"} for k, v in res.items()}}, files=case_files)
     for k, v in res.items():
         st.write(f"✅ {NAMES[k]}：{v['width']:,}×{v['height']:,} 格、格距 {v['cell']:.3g} m、{v['size_mb']:,.1f} MB")
 
@@ -197,7 +254,7 @@ if srcs:
     if len(srcs) > 1 and bc[-1].button("✂️ 全部一起裁切", type="primary"):
         do_crop(list(srcs))
 
-done = st.session_state.get("pre") or {}
+done = st.session_state.get("pre") or {k: v for k, v in case_files.items() if k in ("t1", "t2", "ortho") and os.path.isfile(v)}
 if done:
     st.divider()
     st.markdown("**已完成的前處理成果（主頁 app 會自動使用）：** " + "、".join(NAMES[k] for k in done))
@@ -214,4 +271,10 @@ for k, v in (st.session_state.get("pre_info") or {}).items():
 if done and st.button("清除前處理成果與鎖定範圍"):
     for key in ("pre", "pre_info", "crop_lock"):
         st.session_state.pop(key, None)
+    for _k in ("t1", "t2", "ortho"):
+        case_files.pop(_k, None)
+    new_state = dict(case_state)
+    for _k in ("crop_lock", "pre_info"):
+        new_state.pop(_k, None)
+    cm.update_case(user["id"], case_id, state=new_state, files=case_files)
     st.rerun()
