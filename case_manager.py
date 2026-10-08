@@ -3,8 +3,7 @@
 雲端 Streamlit：使用 Streamlit Secrets 中的 SUPABASE_DB_* 連線 Supabase。
 本機若未設定這些 Secrets，仍可使用原本的 .dod_data/cases.sqlite3。
 
-注意：這一版先把「使用者／案件資料」改成持久化 PostgreSQL；
-DEM/DSM 等實體檔案仍沿用本機檔案機制，下一階段再接 Supabase Storage。
+雲端版的使用者／案件資料與 DEM/DSM、正射影像、滑動面等案件檔案皆持久化於 Supabase；本機未設定 Supabase 時仍可使用原本 SQLite／本機檔案 fallback。
 """
 from __future__ import annotations
 
@@ -16,6 +15,11 @@ import secrets
 import shutil
 import sqlite3
 import time
+import mimetypes
+import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 from copy import deepcopy
 from pathlib import Path
 
@@ -36,6 +40,9 @@ except Exception:  # pragma: no cover
 ROOT = Path(os.environ.get("DOD_DATA_DIR", Path(__file__).resolve().parent / ".dod_data"))
 DB = ROOT / "cases.sqlite3"
 FILES = ROOT / "files"
+CACHE = Path(tempfile.gettempdir()) / "landslide_dod_cache"
+STORAGE_BUCKET = "landslide-files"
+_LOCAL_TO_REMOTE = {}
 ROOT.mkdir(parents=True, exist_ok=True)
 FILES.mkdir(parents=True, exist_ok=True)
 
@@ -70,6 +77,144 @@ def _supabase_db_configured() -> bool:
 def using_supabase() -> bool:
     """回傳目前案件資料庫是否使用 Supabase PostgreSQL。"""
     return _supabase_db_configured() and psycopg is not None
+
+
+def using_storage() -> bool:
+    """回傳是否已設定 Supabase Storage 的伺服器端存取。"""
+    return bool(_secret("SUPABASE_URL") and _secret("SUPABASE_SERVICE_ROLE_KEY"))
+
+
+def _storage_url(path: str = "") -> str:
+    base = _secret("SUPABASE_URL").rstrip("/")
+    encoded = "/".join(urllib.parse.quote(part, safe="") for part in path.strip("/").split("/")) if path else ""
+    return f"{base}/storage/v1/object/{STORAGE_BUCKET}/{encoded}"
+
+
+def _storage_request(method: str, path: str, *, data=None, content_type=None):
+    key = _secret("SUPABASE_SERVICE_ROLE_KEY")
+    if not using_storage():
+        raise RuntimeError("尚未設定 Supabase Storage 所需的 SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY。")
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "apikey": key,
+    }
+    if content_type:
+        headers["Content-Type"] = content_type
+    req = urllib.request.Request(_storage_url(path), data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Supabase Storage {method} 失敗（HTTP {e.code}）：{body[:500]}") from e
+
+
+def _storage_upload_bytes(path: str, data: bytes, content_type: str = "application/octet-stream"):
+    headers_key = _secret("SUPABASE_SERVICE_ROLE_KEY")
+    headers = {
+        "Authorization": f"Bearer {headers_key}",
+        "apikey": headers_key,
+        "Content-Type": content_type,
+        "x-upsert": "true",
+    }
+    req = urllib.request.Request(_storage_url(path), data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            resp.read()
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Supabase Storage 上傳失敗（HTTP {e.code}）：{body[:700]}") from e
+
+
+def _storage_download(path: str) -> bytes:
+    return _storage_request("GET", path)
+
+
+def _storage_remove(paths):
+    paths = [p for p in paths if p]
+    if not paths:
+        return
+    key = _secret("SUPABASE_SERVICE_ROLE_KEY")
+    url = f"{_secret('SUPABASE_URL').rstrip('/')}/storage/v1/object/remove"
+    payload = json.dumps({"prefixes": paths}).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=payload,
+        headers={"Authorization": f"Bearer {key}", "apikey": key, "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            resp.read()
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Supabase Storage 刪除失敗（HTTP {e.code}）：{body[:500]}") from e
+
+
+def _cache_path(remote_path: str) -> Path:
+    safe_name = Path(remote_path).name or "file.bin"
+    key = hashlib.sha256(remote_path.encode("utf-8")).hexdigest()[:20]
+    return CACHE / key / safe_name
+
+
+def _hydrate_storage_file(remote_path: str) -> str | None:
+    if not remote_path or not using_storage():
+        return remote_path
+    local = _cache_path(remote_path)
+    local.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if not local.exists() or local.stat().st_size == 0:
+            local.write_bytes(_storage_download(remote_path))
+        _LOCAL_TO_REMOTE[str(local)] = remote_path
+        return str(local)
+    except Exception:
+        return None
+
+
+def _hydrate_files(files: dict) -> dict:
+    if not using_storage():
+        return files
+    out = {}
+    for role, value in files.items():
+        if isinstance(value, str) and value.startswith("users/"):
+            local = _hydrate_storage_file(value)
+            if local:
+                out[role] = local
+        else:
+            out[role] = value
+    return out
+
+
+def _remote_for_value(value: str | None) -> str | None:
+    if not value:
+        return value
+    return _LOCAL_TO_REMOTE.get(str(value), value if str(value).startswith("users/") else None)
+
+
+def _persist_files(user_id, case_id, files: dict) -> dict:
+    """把頁面目前使用的本機路徑轉成 Storage 物件路徑；已是 Storage 路徑則不重傳。"""
+    if not using_storage():
+        return files
+    out = {}
+    for role, value in (files or {}).items():
+        if not value:
+            continue
+        remote = _remote_for_value(str(value))
+        if remote and remote.startswith("users/"):
+            out[role] = remote
+            continue
+        local = Path(str(value))
+        if not local.is_file():
+            # 可能是本機部署下的舊路徑；無法上傳就先保留，避免破壞既有案件狀態。
+            out[role] = str(value)
+            continue
+        safe = local.name
+        stamp = hashlib.sha256(f"{role}:{safe}:{local.stat().st_size}:{local.stat().st_mtime_ns}".encode()).hexdigest()[:12]
+        remote = f"users/{user_id}/cases/{case_id}/{role}_{stamp}_{safe}"
+        ctype = mimetypes.guess_type(safe)[0] or "application/octet-stream"
+        _storage_upload_bytes(remote, local.read_bytes(), ctype)
+        _LOCAL_TO_REMOTE[str(local)] = remote
+        out[role] = remote
+    return out
 
 
 def _sqlite_conn():
@@ -221,7 +366,7 @@ def _normalize_case(row: dict) -> dict:
     if not isinstance(files, dict):
         files = {}
     d["state"] = state
-    d["files"] = files
+    d["files"] = _hydrate_files(files)
     return d
 
 
@@ -309,6 +454,7 @@ def update_case(user_id, case_id, *, name=None, description=None, state=None, fi
     description = old["description"] if description is None else description
     state = deepcopy(old["state"] if state is None else state)
     files = old["files"] if files is None else files
+    files = _persist_files(user_id, case_id, files)
 
     if using_supabase():
         state[_INTERNAL_FILES_KEY] = deepcopy(files)
@@ -342,13 +488,23 @@ def delete_case(user_id, case_id):
 
 
 def save_uploaded_file(user_id, case_id, uploaded_file, role: str):
-    """目前仍寫入本機檔案；Storage 會在下一階段接入。"""
+    """上傳檔案；雲端版存 Supabase Storage，本機 fallback 仍寫入 .dod_data/files。"""
     if uploaded_file is None:
         return None
+    safe = Path(uploaded_file.name).name
+    stamp = hashlib.sha256(f"{role}:{safe}:{uploaded_file.size}".encode()).hexdigest()[:12]
+    if using_storage():
+        remote = f"users/{user_id}/cases/{case_id}/{role}_{stamp}_{safe}"
+        ctype = getattr(uploaded_file, "type", None) or mimetypes.guess_type(safe)[0] or "application/octet-stream"
+        _storage_upload_bytes(remote, bytes(uploaded_file.getbuffer()), ctype)
+        local = _cache_path(remote)
+        local.parent.mkdir(parents=True, exist_ok=True)
+        local.write_bytes(_storage_download(remote))
+        _LOCAL_TO_REMOTE[str(local)] = remote
+        return str(local)
+
     folder = FILES / str(user_id) / str(case_id)
     folder.mkdir(parents=True, exist_ok=True)
-    safe = Path(uploaded_file.name).name
-    stamp = hashlib.sha256(f"{safe}:{uploaded_file.size}".encode()).hexdigest()[:12]
     path = folder / f"{role}_{stamp}_{safe}"
     if not path.exists():
         with open(path, "wb") as f:
@@ -361,7 +517,11 @@ def case_file(user_id, case_id, role: str):
     if not d:
         return None
     p = d.get("files", {}).get(role)
-    return p if p and os.path.isfile(p) else None
+    if p and os.path.isfile(p):
+        return p
+    if using_storage() and isinstance(p, str) and p.startswith("users/"):
+        return _hydrate_storage_file(p)
+    return None
 
 
 init_db()
