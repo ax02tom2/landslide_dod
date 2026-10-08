@@ -3,4 +3,4 @@ maxUploadSize = 1000
 maxMessageSize = 200
 
 [client]
-showSidebarNavigation = false
+showSidebarNavigation = true
