@@ -41,7 +41,7 @@ ZONES = {
     "deposit": ("堆積區", "#1565c0", "polygon"),
     "stable": ("穩定區 (校正用)", "#2e7d32", "polygon"),
     "exclude": ("排除區 (植被/水體/建物)", "#616161", "polygon"),
-    "profile": ("剖面線", "#f9a825", "line"),
+    "profile": ("剖面線", "#7b1fa2", "line"),
 }
 
 # 工程 GIS 圖徵樣式：實際崩塌用實線、潛在滑動體用虛線、堆積區用藍色。
@@ -51,7 +51,7 @@ ZONE_DRAW_STYLES = {
     "deposit": {"color": "#1565c0", "weight": 3.0, "opacity": 0.95, "fillColor": "#1565c0", "fillOpacity": 0.10},
     "stable": {"color": "#2e7d32", "weight": 2.5, "opacity": 0.9, "fillColor": "#2e7d32", "fillOpacity": 0.06, "dashArray": "6 4"},
     "exclude": {"color": "#616161", "weight": 2.5, "opacity": 0.9, "fillColor": "#616161", "fillOpacity": 0.05, "dashArray": "4 4"},
-    "profile": {"color": "#f9a825", "weight": 3.0, "opacity": 0.95},
+    "profile": {"color": "#7b1fa2", "weight": 3.5, "opacity": 0.95},
 }
 POLY_ZONES = [z for z, v in ZONES.items() if v[2] == "polygon"]
 
@@ -393,6 +393,20 @@ if section == "📊 差異與量體":
         fs.update_layout(title="穩定區 dz 分布（應接近 0）", xaxis_title="dz (m)", height=300, margin=dict(t=40, b=30))
         h2.plotly_chart(fs, width="stretch")
 
+# 基準深度參考 → 下方數值同步
+def _sync_depth_from_basis():
+    hint_ = st.session_state.get("_depth_hint")
+    basis_ = st.session_state.get("depth_basis", "自訂")
+    if basis_.startswith("中位數") and hint_:
+        v = hint_["median"]
+    elif basis_ == "平均" and hint_:
+        v = hint_["mean"]
+    elif basis_.startswith("P90") and hint_:
+        v = hint_["p90"]
+    else:
+        v = 2.0
+    st.session_state["d_uni"] = max(round(float(v), 1), 0.5)
+
 # ======================= 殘餘土體 =======================
 slip = None
 thick = None
@@ -430,20 +444,27 @@ if section == "🧱 殘餘土體":
         if method == methods[0]:
             opts = ["中位數（建議基準情境）", "平均", "P90（較保守情境）", "自訂"]
             default_opt = 0 if hint else 3
-            depth_basis = st.selectbox("基準深度參考", opts, index=default_opt, key="depth_basis")
-            if depth_basis.startswith("中位數") and hint:
-                d_default = round(hint["median"], 1)
-            elif depth_basis == "平均" and hint:
-                d_default = round(hint["mean"], 1)
-            elif depth_basis.startswith("P90") and hint:
-                d_default = round(hint["p90"], 1)
-            else:
-                d_default = 2.0
-            depth = st.number_input("基準滑動面深度 d (m，自 T1 地表往下)", 0.1, 200.0, max(d_default, 0.5), 0.5, key="d_uni")
+            if "depth_basis" not in st.session_state:
+                st.session_state["depth_basis"] = opts[default_opt]
+            if "d_uni" not in st.session_state:
+                if hint:
+                    st.session_state["d_uni"] = max(round(float(hint["median"]), 1), 0.5)
+                else:
+                    st.session_state["d_uni"] = 2.0
+            st.session_state["_depth_hint"] = hint
+            depth_basis = st.selectbox(
+                "基準深度參考",
+                opts,
+                key="depth_basis",
+                on_change=_sync_depth_from_basis,
+                help="選擇中位數、平均或 P90 後，下方深度會同步帶入該數值；帶入後仍可手動修改。",
+            )
+            st.caption("選擇參考值後會同步帶入下方；下方數字仍可自行調整。")
+            depth = st.number_input(
+                "滑動面深度 d（m，自 T1 地表往下）",
+                min_value=0.1, max_value=200.0, step=0.5, key="d_uni",
+            )
             slip_label = f"等深度基準情境 d={depth:g} m（參考：{depth_basis}）"
-            st.info("這個深度是工程情境假設，不是由 DoD 直接量測出的真實地下滑動面。")
-        elif method == methods[1]:
-            st.info("此方法為研究性幾何推估，只有按下計算後才會執行，避免進入頁面即大量耗用記憶體。")
         else:
             up = st.file_uploader("滑動面 GeoTIFF", type=["tif", "tiff"], key="slip_up")
             sp = save_upload(up) or demo_slip
@@ -459,7 +480,7 @@ if section == "🧱 殘餘土體":
         stored = st.session_state.get("residual_result")
         ready = stored is not None and stored.get("sig") == res_sig
         if not ready:
-            st.info("為避免大檔當機，滑動面與殘餘土體現在採用『按鈕才計算』。先確認設定，再按下計算。")
+            st.caption("設定完成後，按「計算殘餘土體」才會執行計算。")
         if st.button("▶ 計算殘餘土體", type="primary", disabled=bool(err), key="calc_residual"):
             try:
                 region = potential_region
@@ -614,11 +635,11 @@ if section == "📈 剖面":
             profile_rows = pd.DataFrame({"距離_m": dist, "E": xs, "N": ys, "T1_高程": g1, "T2_高程(校正後)": g2,
                                          "dz": g2 - g1, "滑動面": gs if gs is not None else np.nan})
             dl = st.columns(2)
-            dl[0].download_button("下載剖面 CSV", profile_rows.to_csv(index=False).encode("utf-8-sig"),
-                                  file_name="profile.csv", mime="text/csv")
+            dl[0].download_button("下載剖面資料（CSV）", profile_rows.to_csv(index=False).encode("utf-8-sig"),
+                                  file_name="剖面資料.csv", mime="text/csv")
             try:
-                dl[1].download_button("下載剖面 DXF（距離-高程）", core.profile_to_dxf(dist, profile_series),
-                                      file_name="profile.dxf", mime="application/dxf")
+                dl[1].download_button("下載剖面圖資（DXF）", core.profile_to_dxf(dist, profile_series),
+                                      file_name="剖面圖資.dxf", mime="application/dxf")
             except Exception as e:  # noqa: BLE001
                 dl[1].caption(f"DXF 匯出不可用：{e}")
         except Exception as e:  # noqa: BLE001
@@ -629,25 +650,25 @@ if section == "💾 匯出":
     st.write("按下按鈕才會產生檔案（大範圍時需要數秒）。")
     if st.button("產生匯出檔案", key="mk_exp"):
         out = {}
-        out["dz.tif"] = core.array_to_geotiff_bytes(dz, grid)
+        out["DoD差異高程.tif"] = core.array_to_geotiff_bytes(dz, grid)
         stored_res = st.session_state.get("residual_result")
         if stored_res and stored_res.get("thick") is not None:
-            out["residual_thickness.tif"] = core.array_to_geotiff_bytes(stored_res["thick"], grid)
+            out["殘餘土體厚度.tif"] = core.array_to_geotiff_bytes(stored_res["thick"], grid)
         bio = io.BytesIO()
         with pd.ExcelWriter(bio, engine="openpyxl") as xw:
             pd.DataFrame({"項目": ["降採樣倍率", "格距(m)", "LoD(m)", "校正模式", "膨脹係數", "滑動面來源"],
                           "值": [factor, grid.cell_x, lod, corr_mode, st.session_state.get("bulk", ""), slip_label]}
                          ).to_excel(xw, sheet_name="參數", index=False)
-            pd.DataFrame({"實際崩塌（DoD）": S_src, "堆積區": S_dep, "全區": S_all}).to_excel(xw, sheet_name="量體統計")
+            pd.DataFrame({"實際崩塌（DoD）": S_src, "堆積區": S_dep, "全區": S_all}).to_excel(xw, sheet_name="崩塌與堆積統計")
             if stored_res:
-                pd.DataFrame({"殘餘土體": {"殘餘土體體積_m3": stored_res.get("volume",0), "有殘餘土體面積_m2": stored_res.get("area",0), "平均厚度_m": stored_res.get("mean",0), "最大厚度_m": stored_res.get("max",0)}}).to_excel(xw, sheet_name="殘餘土體")
+                pd.DataFrame({"殘餘土體": {"殘餘土體體積_m3": stored_res.get("volume",0), "有殘餘土體面積_m2": stored_res.get("area",0), "平均厚度_m": stored_res.get("mean",0), "最大厚度_m": stored_res.get("max",0)}}).to_excel(xw, sheet_name="殘餘土體分析")
             if sens_df is not None:
-                sens_df.to_excel(xw, sheet_name="敏感度", index=False)
+                sens_df.to_excel(xw, sheet_name="深度敏感度", index=False)
             if cstats:
-                pd.DataFrame({"校正": cstats}).to_excel(xw, sheet_name="對位校正")
+                pd.DataFrame({"校正": cstats}).to_excel(xw, sheet_name="對位校正結果")
             if profile_rows is not None:
                 profile_rows.to_excel(xw, sheet_name="剖面", index=False)
-        out["summary.xlsx"] = bio.getvalue()
+        out["分析結果.xlsx"] = bio.getvalue()
         st.session_state["exports"] = out
     for fn, data in st.session_state.get("exports", {}).items():
         st.download_button(f"下載 {fn}", data, file_name=fn, key=f"dl_{fn}")
