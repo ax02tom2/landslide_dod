@@ -32,14 +32,14 @@ st.caption("大檔先裁到崩塌範圍、必要時降低解析度，再回主�
 if not st.session_state.get("user"):
     st.warning("請先登入。")
     if st.button("回到案件管理"):
-        st.switch_page("app.py")
+        st.page_link("app.py", label="回案件管理", icon="📁")
     st.stop()
 user = st.session_state["user"]
 case_id = st.session_state.get("case_id")
 if not case_id:
     st.warning("請先建立或開啟案件。")
     if st.button("回到案件管理"):
-        st.switch_page("app.py")
+        st.page_link("app.py", label="回案件管理", icon="📁")
     st.stop()
 case = cm.get_case(user["id"], case_id)
 if not case:
@@ -47,9 +47,9 @@ if not case:
     st.stop()
 st.sidebar.markdown(f"### 📁 {case['name']}")
 if st.sidebar.button("回案件管理", width="stretch"):
-    st.switch_page("app.py")
+    st.page_link("app.py", label="回案件管理", icon="📁")
 if st.sidebar.button("前往 ② 地形變異分析｜DoD", width="stretch"):
-    st.switch_page("pages/2_analysis.py")
+    st.page_link("pages/2_analysis.py", label="前往 ② 地形變異分析｜DoD", icon="⛰️")
 
 case_files = dict(case.get("files") or {})
 case_state = dict(case.get("state") or {})
