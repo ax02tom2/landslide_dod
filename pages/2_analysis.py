@@ -677,24 +677,6 @@ def build_overlays():
 
 
 if section == "🗺️ 範圍與剖面線":
-    st.markdown("""<style>
-    /* Leaflet Draw 控制點：小而清楚，避免遮住 DoD。 */
-    /* Leaflet Draw 編輯控制點：維持小尺寸，避免遮住影像與 DoD。 */
-    .leaflet-editing-icon,
-    .leaflet-marker-icon.leaflet-editing-icon,
-    .leaflet-div-icon.leaflet-editing-icon,
-    .leaflet-marker-icon.leaflet-div-icon.leaflet-editing-icon {
-        width: 4px !important;
-        height: 4px !important;
-        margin-left: -2px !important;
-        margin-top: -2px !important;
-        padding: 0 !important;
-        border: 1px solid #ffffff !important;
-        border-radius: 1px !important;
-        box-sizing: border-box !important;
-        box-shadow: 0 0 1px rgba(0,0,0,.55) !important;
-    }
-    </style>""", unsafe_allow_html=True)
     zone = st.radio("目前要繪製的類型", list(ZONES), format_func=lambda z: ZONES[z][0], horizontal=True, key="draw_zone")
     st.caption("🔴 實際崩塌＝DoD 已發生變化；🟠 潛在滑動體＝後續殘餘土體評估；🔵 堆積區＝崩落土體堆積位置。三者用途分開，不互相取代。畫完後按「💾 儲存」。")
     with st.spinner("準備地圖圖層…"):
@@ -706,6 +688,30 @@ if section == "🗺️ 範圍與剖面線":
     north, east = overlays[0][2][1]
     m = folium.Map(location=[(south + north) / 2, (west + east) / 2], zoom_start=16, tiles=None,
                    control_scale=True, max_zoom=22)
+
+    # Leaflet Draw 的地圖是在 st_folium iframe 內渲染；CSS 必須注入 Folium 地圖本身，
+    # 不能只放在 Streamlit 外層頁面。這裡沿用先前實際顯示效果較好的 6 px 控制點。
+    folium.Element("""
+    <style>
+      .leaflet-editing-icon,
+      .leaflet-vertex-icon {
+        width: 6px !important;
+        height: 6px !important;
+        margin-left: -3px !important;
+        margin-top: -3px !important;
+        border-width: 1px !important;
+        box-sizing: border-box !important;
+      }
+      .leaflet-touch .leaflet-editing-icon,
+      .leaflet-touch .leaflet-vertex-icon {
+        width: 7px !important;
+        height: 7px !important;
+        margin-left: -3.5px !important;
+        margin-top: -3.5px !important;
+      }
+    </style>
+    """).add_to(m.get_root().header)
+
     folium.TileLayer("OpenStreetMap", name="OSM", max_zoom=22, max_native_zoom=19).add_to(m)
     folium.TileLayer(
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
