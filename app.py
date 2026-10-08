@@ -6,8 +6,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from pathlib import Path
-
 import streamlit as st
 
 import case_manager as cm
@@ -104,8 +102,8 @@ nav_pages = {
         st.Page(render_case_home, title="案件管理", icon="📁", url_path="cases"),
     ],
     "作業順序": [
-        st.Page(str(Path(__file__).resolve().parent / "pages" / "1_preprocess.py"), title="① 前處理｜裁切與縮小", icon="✂️", url_path="preprocess"),
-        st.Page(str(Path(__file__).resolve().parent / "pages" / "2_analysis.py"), title="② 地形變異分析｜DoD", icon="⛰️", url_path="analysis"),
+        st.Page("pages/1_preprocess.py", title="① 前處理｜裁切與縮小", icon="✂️", url_path="preprocess"),
+        st.Page("pages/2_analysis.py", title="② 地形變異分析｜DoD", icon="⛰️", url_path="analysis"),
     ],
 }
 
