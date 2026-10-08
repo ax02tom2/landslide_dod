@@ -1,62 +1,83 @@
-"""崩塌地形變異分析 — 主入口與工作流程導航
-
-使用者只需要依序操作：
-① 前處理｜裁切與縮小
-② 地形變異分析｜DoD
-
-本檔案本身不作為分析工作頁；它只負責正式入口、品牌標題與頁面導航。
-"""
-from __future__ import annotations
-
+"""崩塌地形變異分析｜案件入口"""
 import streamlit as st
+import case_manager as cm
 
-st.set_page_config(
-    page_title="崩塌地形變異分析",
-    page_icon="⛰️",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+st.set_page_config(page_title="崩塌地形變異分析", page_icon="⛰️", layout="wide")
 
-# ------------------------------------------------------------------
-# 左側正式工作流程
-# ------------------------------------------------------------------
-with st.sidebar:
-    st.markdown(
-        """
-        <div style="
-            font-size: 1.18rem;
-            font-weight: 700;
-            line-height: 1.35;
-            margin: 0.2rem 0 0.35rem 0;
-        ">
-            ⛰️ 崩塌地形變異分析
-        </div>
-        <div style="
-            color: #6b7280;
-            font-size: 0.82rem;
-            margin-bottom: 1rem;
-        ">
-            工程分析工作流程
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
 
-# st.navigation 會取代 Streamlit 原本的自動 pages 導航，
-# 因此左側不再顯示「app / 1_preprocess / 2_analysis」等程式檔名。
-pages = [
-    st.Page(
-        "pages/1_preprocess.py",
-        title="① 前處理｜裁切與縮小",
-        icon="📐",
-        default=True,
-    ),
-    st.Page(
-        "pages/2_analysis.py",
-        title="② 地形變異分析｜DoD",
-        icon="⛰️",
-    ),
-]
+def logged_in():
+    return st.session_state.get("user") is not None
 
-pg = st.navigation(pages, position="sidebar")
-pg.run()
+if not logged_in():
+    st.title("⛰️ 崩塌地形變異分析")
+    st.caption("案件管理版｜前處理 → DoD 分析 → 儲存與重新開啟")
+    a, b = st.tabs(["登入", "建立使用者"])
+    with a:
+        u = st.text_input("使用者名稱", key="login_u")
+        p = st.text_input("密碼", type="password", key="login_p")
+        if st.button("登入", type="primary", width="stretch"):
+            user = cm.authenticate(u, p)
+            if user:
+                st.session_state["user"] = user
+                st.rerun()
+            st.error("使用者名稱或密碼錯誤。")
+    with b:
+        u2 = st.text_input("使用者名稱", key="reg_u")
+        p2 = st.text_input("密碼（至少 6 碼）", type="password", key="reg_p")
+        p3 = st.text_input("再次輸入密碼", type="password", key="reg_p2")
+        if st.button("建立使用者", width="stretch"):
+            if p2 != p3:
+                st.error("兩次密碼不一致。")
+            else:
+                ok, msg = cm.register(u2, p2)
+                (st.success if ok else st.error)(msg)
+    st.info("每個使用者只能看到自己建立的案件。案件設定、圈繪範圍與前處理成果會依案件分開保存。")
+    st.stop()
+
+user = st.session_state["user"]
+st.sidebar.markdown(f"### 👤 {user['username']}")
+if st.sidebar.button("登出", width="stretch"):
+    st.session_state.clear()
+    st.rerun()
+
+st.title("⛰️ 崩塌地形變異分析")
+st.subheader("案件管理")
+st.write("先建立或開啟案件，再依序執行：**① 前處理｜裁切與縮小 → ② 地形變異分析｜DoD**。")
+
+cases = cm.list_cases(user["id"])
+if cases:
+    st.markdown("### 我的案件")
+    for c in cases:
+        col1, col2, col3 = st.columns([5, 2, 1])
+        col1.markdown(f"**{c['name']}**  ·  最後更新：{__import__('datetime').datetime.fromtimestamp(c['updated_at']).strftime('%Y-%m-%d %H:%M')}")
+        if c.get("description"):
+            col1.caption(c["description"])
+        if col2.button("開啟案件", key=f"open_{c['id']}", width="stretch"):
+            st.session_state["case_id"] = c["id"]
+            st.session_state["case"] = cm.get_case(user["id"], c["id"])
+            st.switch_page("pages/2_analysis.py")
+        if col3.button("刪除", key=f"del_{c['id']}"):
+            cm.delete_case(user["id"], c["id"])
+            if st.session_state.get("case_id") == c["id"]:
+                st.session_state.pop("case_id", None)
+                st.session_state.pop("case", None)
+            st.rerun()
+else:
+    st.info("目前還沒有案件。")
+
+st.divider()
+st.markdown("### 建立新案件")
+name = st.text_input("案件名稱", placeholder="例如：1150706 ○○崩塌地分析")
+desc = st.text_area("案件說明（選填）", placeholder="位置、事件日期、分析目的等")
+if st.button("＋ 建立案件並開始", type="primary"):
+    if not name.strip():
+        st.error("請輸入案件名稱。")
+    else:
+        case = cm.create_case(user["id"], name, desc)
+        st.session_state["case_id"] = case["id"]
+        st.session_state["case"] = case
+        st.switch_page("pages/1_preprocess.py")
+
+st.sidebar.divider()
+st.sidebar.markdown("**作業順序**")
+st.sidebar.markdown("① 前處理｜裁切與縮小  \n↓  \n② 地形變異分析｜DoD")
