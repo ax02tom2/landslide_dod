@@ -666,14 +666,8 @@ if section == "🧱 殘餘土體":
         f"目前殘餘土體分析：潛在滑動體＝{st.session_state.get('potential_region_choice', '全部')}；"
         f"崩塌深度參考＝{st.session_state.get('collapse_region_choice', '全部')}"
     )
-    st.markdown("### A. 堆積土體（崩落後堆積在坡腳）")
-    ca = st.columns(4)
-    ca[0].metric("堆積體積", fmt_m3(S_dep["堆積體積_m3"]))
-    ca[1].metric("堆積面積", fmt_m2(S_dep["堆積面積_m2"]))
-    ca[2].metric("平均堆積厚", f"{S_dep['平均堆積厚_m']:.2f} m")
-    ca[3].metric("最大堆積厚", f"{S_dep['最大堆積厚_m']:.2f} m")
-
-    st.markdown("### B. 潛在滑動體內殘餘不穩定土體")
+    st.markdown("### 潛在滑動體內殘餘不穩定土體")
+    st.caption("堆積土體的統計統一放在「差異與量體」頁，本頁只處理潛在滑動體內的殘餘不穩定土體與滑動面假設。")
     if case_state.get("residual_summary") and st.session_state.get("residual_result") is None:
         rs0 = case_state["residual_summary"]
         st.info(f"本案件已保存上次計算摘要：殘餘土體 {fmt_m3(float(rs0.get('volume', 0)))}、有殘餘土體面積 {fmt_m2(float(rs0.get('area', 0)))}。若修改了範圍或設定，請重新計算。")
