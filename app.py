@@ -79,5 +79,21 @@ if st.button("＋ 建立案件並開始", type="primary"):
         st.switch_page("pages/1_preprocess.py")
 
 st.sidebar.divider()
-st.sidebar.markdown("**作業順序**")
-st.sidebar.markdown("① 前處理｜裁切與縮小  \n↓  \n② 地形變異分析｜DoD")
+st.sidebar.markdown("### 作業順序")
+
+# 這裡改成真正可點擊的導覽按鈕；原本只是 markdown 文字，所以無法點擊。
+current_case_id = st.session_state.get("case_id")
+current_case = None
+if current_case_id:
+    current_case = cm.get_case(user["id"], current_case_id)
+
+if current_case:
+    st.sidebar.caption(f"目前案件：{current_case['name']}")
+    if st.sidebar.button("① 前處理｜裁切與縮小", key="nav_preprocess", width="stretch"):
+        st.switch_page("pages/1_preprocess.py")
+    if st.sidebar.button("② 地形變異分析｜DoD", key="nav_analysis", type="primary", width="stretch"):
+        st.switch_page("pages/2_analysis.py")
+else:
+    st.sidebar.button("① 前處理｜裁切與縮小", key="nav_preprocess_disabled", width="stretch", disabled=True)
+    st.sidebar.button("② 地形變異分析｜DoD", key="nav_analysis_disabled", width="stretch", disabled=True)
+    st.sidebar.caption("請先建立或開啟案件")
